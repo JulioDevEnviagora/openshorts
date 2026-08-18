@@ -13,6 +13,7 @@ from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
 import os
+from yolo_weights import yolo_weights_path
 import numpy as np
 from tqdm import tqdm
 import yt_dlp
@@ -75,8 +76,9 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 }}
 """
 
-# Load the YOLO model once (Keep for backup or scene analysis if needed)
-model = YOLO('yolov8n.pt')
+# Load the YOLO model once. Path is the image-baked weights (outside /app)
+# so a root-owned checkout mount cannot hide them or catch a re-download.
+model = YOLO(yolo_weights_path())
 
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed

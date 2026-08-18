@@ -1,0 +1,15 @@
+# Local live-reload. Not used by Dokploy.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Bind-mounts the checkout over /app so backend Python picks up edits without
+# a rebuild. Production / Dokploy must use docker-compose.yml alone: the image
+# already contains the code and baked YOLO weights; a root-owned clone would
+# hide both.
+services:
+  backend:
+    volumes: !override
+      - .:/app
+      - /app/__pycache__
+      - uploads_data:/app/uploads
+      - output_data:/app/output
