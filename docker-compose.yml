@@ -24,6 +24,10 @@ services:
     container_name: openshorts-frontend
     ports:
       - "5175:5173"
+    # Extra Vite Host headers (comma-separated). Defaults already include
+    # openshorts.app, www.openshorts.app and openshorts.julioakamine.com.
+    environment:
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-}
     volumes:
       - ./dashboard:/app
       - /app/node_modules
