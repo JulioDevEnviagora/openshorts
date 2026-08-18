@@ -7,21 +7,111 @@ import pytest
 import gemini_worker
 
 
+@pytest.fixture(autouse=True)
+def _clean_ai_env(monkeypatch):
+    monkeypatch.delenv("AI_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+
+
 class TestResolveApiKey:
-    def test_openrouter_wins(self, monkeypatch):
+    def test_openrouter_wins_without_touching_gemini(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
         monkeypatch.setenv("GEMINI_API_KEY", "AIza-old")
+        assert gemini_worker.resolve_provider() == "openrouter"
         assert gemini_worker.resolve_api_key() == "sk-or-1"
+        assert gemini_worker.gemini_key() == "AIza-old"
 
-    def test_falls_back_to_gemini_key(self, monkeypatch):
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        monkeypatch.setenv("GEMINI_API_KEY", "AIza-old")
-        assert gemini_worker.resolve_api_key() == "AIza-old"
-
-    def test_missing_both_is_none(self, monkeypatch):
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    def test_gemini_key_never_returned_for_openrouter(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER", "openrouter")
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-studio")
         assert gemini_worker.resolve_api_key() is None
+        assert gemini_worker.openrouter_key() is None
+
+    def test_openrouter_key_never_returned_for_gemini(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER", "gemini")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secret")
+        assert gemini_worker.resolve_api_key() is None
+        assert gemini_worker.gemini_key() is None
+
+    def test_aiza_in_openrouter_env_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "AIza-leaked")
+        assert gemini_worker.openrouter_key() is None
+
+    def test_sk_or_in_gemini_env_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-or-v1-leaked")
+        assert gemini_worker.gemini_key() is None
+
+    def test_gemini_only_selects_gemini_provider(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-studio")
+        assert gemini_worker.resolve_provider() == "gemini"
+        assert gemini_worker.resolve_api_key() == "AIza-studio"
+
+    def test_missing_both_is_none(self):
+        assert gemini_worker.resolve_api_key() is None
+
+
+class TestKeyIsolationClients:
+    def test_openrouter_client_rejects_ai_studio_key(self):
+        with pytest.raises(RuntimeError, match="AIza"):
+            gemini_worker.openrouter_client("AIza-studio")
+
+    def test_openrouter_client_does_not_read_gemini_env(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-studio")
+        with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+            gemini_worker.openrouter_client()
+
+    def test_gemini_client_rejects_openrouter_key(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER", "gemini")
+        with pytest.raises(RuntimeError, match="OpenRouter"):
+            gemini_worker.gemini_client("sk-or-v1-secret")
+
+    def test_gemini_client_refuses_when_provider_is_openrouter(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER", "openrouter")
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-studio")
+        with pytest.raises(RuntimeError, match="openrouter"):
+            gemini_worker.gemini_client()
+
+
+class TestApplyAiKeysToEnv:
+    def test_openrouter_job_keeps_compose_key_and_drops_gemini(self):
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-compose",
+            "GEMINI_API_KEY": "AIza-studio",
+            "MANAGED_GEMINI_API_KEY": "AIza-managed",
+        }
+        gemini_worker.apply_ai_keys_to_env(env, "openrouter")
+        assert env["OPENROUTER_API_KEY"] == "sk-or-compose"
+        assert "GEMINI_API_KEY" not in env
+        assert env["MANAGED_GEMINI_API_KEY"] == "AIza-managed"
+        assert env["AI_PROVIDER"] == "openrouter"
+
+    def test_managed_gemini_is_never_copied_to_openrouter(self):
+        env = {"MANAGED_GEMINI_API_KEY": "AIza-managed"}
+        gemini_worker.apply_ai_keys_to_env(env, "openrouter")
+        assert env.get("OPENROUTER_API_KEY") in (None, "")
+        assert env.get("GEMINI_API_KEY") in (None, "")
+
+    def test_gemini_job_drops_openrouter_key(self):
+        env = {
+            "OPENROUTER_API_KEY": "sk-or-compose",
+            "GEMINI_API_KEY": "AIza-studio",
+        }
+        gemini_worker.apply_ai_keys_to_env(env, "gemini")
+        assert env["GEMINI_API_KEY"] == "AIza-studio"
+        assert "OPENROUTER_API_KEY" not in env
+
+    def test_byok_aiza_rejected_for_openrouter(self):
+        env = {"OPENROUTER_API_KEY": "sk-or-compose"}
+        with pytest.raises(RuntimeError, match="AIza"):
+            gemini_worker.apply_ai_keys_to_env(env, "openrouter", byok_key="AIza-studio")
+
+    def test_byok_openrouter_rejected_for_gemini(self):
+        env = {"GEMINI_API_KEY": "AIza-studio"}
+        with pytest.raises(RuntimeError, match="OpenRouter"):
+            gemini_worker.apply_ai_keys_to_env(env, "gemini", byok_key="sk-or-v1-secret")
 
 
 class TestResolveModel:
@@ -29,6 +119,10 @@ class TestResolveModel:
         monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
         monkeypatch.delenv("GEMINI_MODEL", raising=False)
         assert gemini_worker.resolve_model() == "google/gemini-2.5-flash"
+
+    def test_gemini_provider_uses_native_default(self, monkeypatch):
+        monkeypatch.setenv("AI_PROVIDER", "gemini")
+        assert gemini_worker.resolve_model() == "gemini-3.1-flash-lite"
 
     def test_openrouter_model_wins(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
@@ -123,10 +217,9 @@ class TestJpegDataUris:
 
 
 class TestFileApiSkip:
-    def test_message_names_file_api_and_openrouter(self):
-        assert "File API" in gemini_worker.FILE_API_UNAVAILABLE
-        assert "OpenRouter" in gemini_worker.FILE_API_UNAVAILABLE
+    def test_image_generation_is_gemini_only(self):
+        assert "OpenRouter" in gemini_worker.GEMINI_IMAGE_ONLY
 
-    def test_visual_clips_skips_without_calling_file_api(self):
+    def test_visual_clips_does_not_raise_file_api_unavailable(self):
         main = pytest.importorskip("main")
         assert main.get_visual_clips("missing.mp4", 30) is None

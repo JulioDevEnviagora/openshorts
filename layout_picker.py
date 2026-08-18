@@ -153,12 +153,10 @@ def pick(video_path, video_duration):
             print("   ⚠️ No readable frames — keeping the default layout.")
             return "none"
 
-        client = gemini_worker.openrouter_client(api_key)
-        content = gemini_worker.jpeg_image_url_parts(frames)
-        content.append({"type": "text", "text": gemini_worker.LAYOUT_CHOICE_PROMPT})
-        parsed, _response = gemini_worker.complete_json(
-            client, model_name, None, gemini_worker.LayoutChoice,
-            messages=[{"role": "user", "content": content}])
+        client = gemini_worker.make_client(api_key)
+        parsed, _response = gemini_worker.complete_json_with_frames(
+            client, model_name, gemini_worker.LAYOUT_CHOICE_PROMPT,
+            gemini_worker.LayoutChoice, frames)
         answer = parsed or {}
     except Exception as e:
         print(f"   ⚠️ Layout choice failed ({e}) — keeping the default layout.")

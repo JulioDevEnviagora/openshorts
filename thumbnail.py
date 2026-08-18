@@ -17,9 +17,7 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
     If transcript is provided, skips Whisper transcription.
     Returns: { "titles": [...], "transcript_summary": "...", "language": "...", "segments": [...], "video_duration": ... }
     """
-    # Video File API is not available via OpenRouter. Fail before any upload.
     import gemini_worker
-    raise RuntimeError(gemini_worker.FILE_API_UNAVAILABLE)
 
     if transcript is None:
         from main import transcribe_video
@@ -27,18 +25,6 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
         transcript = transcribe_video(video_path)
     else:
         print("🎬 [Thumbnail] Using pre-computed transcript (Whisper already done)...")
-
-    print("📤 [Thumbnail] Uploading video to Gemini...")
-    client = genai.Client(api_key=api_key)
-
-    file_upload = client.files.upload(file=video_path)
-    while True:
-        file_info = client.files.get(name=file_upload.name)
-        if file_info.state == "ACTIVE":
-            break
-        elif file_info.state == "FAILED":
-            raise Exception("Video processing failed by Gemini.")
-        time.sleep(2)
 
     prompt = f"""You are a YouTube title expert who creates viral, click-worthy titles.
 
@@ -72,34 +58,59 @@ OUTPUT JSON:
 }}"""
 
     print("🤖 [Thumbnail] Asking Gemini for title suggestions...")
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[file_upload, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
+    provider = gemini_worker.resolve_provider()
+    parsed_result = None
+    response = None
+    if provider == "openrouter":
+        import layout_picker
+        client = gemini_worker.make_client(api_key, provider="openrouter")
+        frames = layout_picker.sample_frames(video_path)
+        if not frames:
+            raise RuntimeError("Could not sample video frames for title analysis.")
+        parsed_result, response = gemini_worker.complete_json_with_frames(
+            client, gemini_worker.resolve_model(), prompt, None, frames)
+    else:
+        print("📤 [Thumbnail] Uploading video to Gemini...")
+        client = gemini_worker.make_client(api_key, provider="gemini")
+        file_upload = client.files.upload(file=video_path)
+        while True:
+            file_info = client.files.get(name=file_upload.name)
+            if file_info.state == "ACTIVE":
+                break
+            elif file_info.state == "FAILED":
+                raise Exception("Video processing failed by Gemini.")
+            time.sleep(2)
+        response = client.models.generate_content(
+            model=TEXT_MODEL,
+            contents=[file_upload, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
-    )
 
     # Extract segments and duration from transcript for later use
     segments = transcript.get("segments", [])
     video_duration = segments[-1]["end"] if segments else 0
 
     try:
-        text = response.text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
+        if isinstance(parsed_result, dict) and parsed_result.get("titles"):
+            result = parsed_result
+        else:
+            text = (getattr(response, "text", None) or "").strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
 
-        start_idx = text.find('{')
-        end_idx = text.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            text = text[start_idx:end_idx + 1]
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                text = text[start_idx:end_idx + 1]
 
-        result = json.loads(text)
+            result = json.loads(text)
         result["transcript_summary"] = result.get("transcript_summary", "")
         result["language"] = result.get("language", transcript["language"])
         result["segments"] = segments
@@ -120,7 +131,9 @@ def refine_titles(api_key, context, user_message, conversation_history=None):
     """
     Takes video context + user feedback and returns refined title suggestions.
     """
-    client = genai.Client(api_key=api_key)
+    import gemini_worker
+    provider = gemini_worker.resolve_provider()
+    client = gemini_worker.make_client(api_key, provider=provider)
 
     history_text = ""
     if conversation_history:
@@ -150,13 +163,19 @@ OUTPUT JSON:
     "titles": ["title1", "title2", ...]
 }}"""
 
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
+    if provider == "openrouter":
+        parsed, response = gemini_worker.complete_json(
+            client, gemini_worker.resolve_model(), prompt, None)
+        if isinstance(parsed, dict) and parsed.get("titles"):
+            return parsed
+    else:
+        response = client.models.generate_content(
+            model=TEXT_MODEL,
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
-    )
 
     try:
         text = response.text.strip()
@@ -184,6 +203,8 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
     Generates YouTube thumbnails using Gemini image generation.
     Returns list of saved image paths (relative URLs).
     """
+    import gemini_worker
+    gemini_worker.assert_google_safe_key(api_key)
     client = genai.Client(api_key=api_key)
 
     output_dir = os.path.join("output", "thumbnails", session_id)
@@ -286,6 +307,8 @@ def generate_youtube_description(api_key, title, transcript_segments, language, 
     Uses Gemini to generate a YouTube description with chapter markers from transcript segments.
     Returns: { "description": "full description text with chapters" }
     """
+    import gemini_worker
+    gemini_worker.assert_google_safe_key(api_key)
     client = genai.Client(api_key=api_key)
 
     # Format segments for the prompt

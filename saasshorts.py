@@ -42,6 +42,14 @@ DEFAULT_VOICES = {
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL_SAAS") or os.environ.get("GEMINI_MODEL") or "gemini-3.1-flash-lite"
 
 
+def _google_client(gemini_key: str):
+    """Native Gemini only. OpenRouter keys are rejected before they hit Google."""
+    import gemini_worker
+    gemini_worker.assert_google_safe_key(gemini_key)
+    from google import genai
+    return genai.Client(api_key=gemini_key)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Phase 1: Website Scraping, Web Research & Analysis
 # ═══════════════════════════════════════════════════════════════════════
@@ -57,7 +65,7 @@ def research_saas_online(url: str, gemini_key: str) -> dict:
 
     print(f"[SaaSShorts] 🔍 Researching {url} across the web (Google Search grounding)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = _google_client(gemini_key)
 
     # Extract domain name for search queries
     domain = url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -268,7 +276,7 @@ def analyze_saas(scraped_data: dict, gemini_key: str, web_research: dict = None)
 
     print(f"[SaaSShorts] 🧠 Analyzing {scraped_data['url']} (with web research)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = _google_client(gemini_key)
 
     # Build web research context
     research_context = ""
@@ -402,7 +410,7 @@ def generate_scripts(
     lang_name = "Spanish" if language == "es" else "English"
     print(f"[SaaSShorts] 📝 Generating {num_scripts} scripts ({style}, {lang_name})...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = _google_client(gemini_key)
 
     style_guide = {
         "ugc": "Natural, authentic UGC style. Person talking to camera like sharing a discovery with a friend. Casual, genuine.",

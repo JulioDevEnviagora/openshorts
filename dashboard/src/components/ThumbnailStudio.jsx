@@ -70,10 +70,13 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId, managed = false }) {
+export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter', uploadPostKey, uploadUserId, managed = false }) {
   // Managed (hosted plan): Gemini runs server-side via the bearer token, no BYOK key.
   // Only send X-Gemini-Key for self-host BYOK. apiFetch attaches the bearer token.
-  const keyHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
+  const keyHeader = {
+    'X-AI-Provider': aiProvider,
+    ...(geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {}),
+  };
   const needsKey = !geminiApiKey && !managed;
   // Step management
   const [step, setStep] = useState(0);

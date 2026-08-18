@@ -1175,9 +1175,10 @@ def transcribe_video(video_path):
     return transcript
 
 def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced OpenRouter call with transient-error backoff.
+    """One schema-enforced provider call with transient-error backoff.
     Returns (parsed_dict, cost_analysis)."""
     max_attempts = 3
+    label = gemini_worker.resolve_provider()
     for attempt in range(1, max_attempts + 1):
         try:
             parsed, response = gemini_worker.complete_json(
@@ -1195,7 +1196,7 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ OpenRouter transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            print(f"⚠️ {label} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
 
 
@@ -1207,16 +1208,17 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
     """
-    print("\U0001f916  Analyzing with OpenRouter (2-pass: score → detail)...")
+    provider = gemini_worker.resolve_provider()
+    print(f"\U0001f916  Analyzing with {provider} (2-pass: score → detail)...")
     api_key = gemini_worker.resolve_api_key()
     if not api_key:
-        print("❌ Error: OPENROUTER_API_KEY (or GEMINI_API_KEY fallback) not found.")
+        print(f"❌ Error: no API key for provider={provider}.")
         return None
 
-    client = gemini_worker.openrouter_client(api_key)
+    client = gemini_worker.make_client(api_key)
     model_name = gemini_worker.resolve_model()
     language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
+    print(f"\U0001f916  Provider: {provider} | Model: {model_name} | language: {language}")
 
     # Full word list — ground truth for snapping cut points.
     words = []
@@ -1298,20 +1300,128 @@ def get_viral_clips(transcript_result, video_duration):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ OpenRouter Error: {e}")
+        print(f"❌ {provider} Error: {e}")
         return None
 
 
-def get_visual_clips(video_path, video_duration, language="en"):
-    """Silent-video vision still needs the Google Gemini File API.
+def _visual_clip_targets():
+    def _env_int(name, default):
+        try:
+            return max(1, int(os.environ.get(name, "")))
+        except ValueError:
+            return default
+    v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
+    v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
+    v_min_secs, v_max_secs = clip_duration_bounds()
+    return v_min_clips, v_max_clips, v_min_secs, v_max_secs
 
-    OpenRouter has no video-upload stack on this path — skip with a clear
-    error instead of pretending to analyze. Podcasts with speech use
-    get_viral_clips.
-    """
-    print(f"❌ {gemini_worker.FILE_API_UNAVAILABLE}")
-    print("   Silent videos cannot be analyzed until a video-upload path exists.")
-    return None
+
+def _clean_visual_shorts(shorts, video_duration):
+    clean = []
+    for s in shorts or []:
+        s["start"] = max(0.0, float(s.get("start", 0)))
+        s["end"] = min(float(video_duration), float(s.get("end", 0)))
+        if s["end"] - s["start"] >= 1.0:
+            clean.append(s)
+    return clean
+
+
+def get_visual_clips(video_path, video_duration, language="en"):
+    """Clip a SILENT video by vision. Gemini uploads the file; OpenRouter
+    sends sampled JPEG frames. Same {"shorts", "cost_analysis"} shape."""
+    provider = gemini_worker.resolve_provider()
+    print(f"🎥  Silent video — analyzing with {provider} vision (no transcript)...")
+    api_key = gemini_worker.resolve_api_key()
+    if not api_key:
+        print(f"❌ Error: no API key for provider={provider}.")
+        return None
+    client = gemini_worker.make_client(api_key)
+    model_name = gemini_worker.resolve_model()
+    v_min_clips, v_max_clips, v_min_secs, v_max_secs = _visual_clip_targets()
+    prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+        video_duration=video_duration, language=language,
+        min_clips=v_min_clips, max_clips=v_max_clips,
+        min_secs=v_min_secs, max_secs=v_max_secs)
+    print(f"🎥  Provider: {provider} | Model: {model_name}")
+
+    if provider == "openrouter":
+        return _visual_clips_from_frames(
+            client, model_name, video_path, video_duration, prompt)
+
+    file_upload = None
+    try:
+        print(f"   uploading {os.path.basename(video_path)}…")
+        file_upload = client.files.upload(file=video_path)
+        deadline = time.time() + 180
+        while True:
+            info = client.files.get(name=file_upload.name)
+            state = str(getattr(getattr(info, "state", info), "name", "")).upper()
+            if state == "ACTIVE":
+                break
+            if state == "FAILED":
+                print("❌ Gemini could not process the video.")
+                return None
+            if time.time() > deadline:
+                print("❌ Gemini video processing timed out.")
+                return None
+            time.sleep(2)
+
+        parsed, response = gemini_worker.complete_json(
+            client, model_name, prompt, gemini_worker.VisualResponse,
+            contents=[file_upload, prompt])
+        clean = _clean_visual_shorts(parsed.get("shorts"), video_duration)
+        if not clean:
+            print("⚠️ Vision pass returned no usable clips.")
+            return None
+        cost = gemini_worker._calculate_cost_analysis(response, model_name)
+        if cost:
+            print(f"💰 Vision cost ({model_name}): ${cost.get('total_cost', 0):.6f}")
+        result = {"shorts": clean}
+        if cost:
+            result["cost_analysis"] = cost
+        return result
+    except gemini_worker.GeminiBlockedError as e:
+        print(f"🚫 {e}")
+        raise
+    except Exception as e:
+        print(f"❌ Gemini vision error: {e}")
+        return None
+    finally:
+        if file_upload is not None:
+            try:
+                client.files.delete(name=file_upload.name)
+            except Exception:
+                pass
+
+
+def _visual_clips_from_frames(client, model_name, video_path, video_duration, prompt):
+    """OpenRouter (and any no-File-API provider): 12×1024 JPEG samples."""
+    import layout_picker
+    frames = layout_picker.sample_frames(video_path)
+    if not frames:
+        print("❌ No readable frames — cannot analyze a silent video.")
+        return None
+    print(f"   sampled {len(frames)} JPEG frame(s) @ {layout_picker.SAMPLE_WIDTH}px")
+    try:
+        parsed, response = gemini_worker.complete_json_with_frames(
+            client, model_name, prompt, gemini_worker.VisualResponse, frames)
+        clean = _clean_visual_shorts(parsed.get("shorts"), video_duration)
+        if not clean:
+            print("⚠️ Vision pass returned no usable clips.")
+            return None
+        cost = gemini_worker._calculate_cost_analysis(response, model_name)
+        if cost:
+            print(f"💰 Vision cost ({model_name}): ${cost.get('total_cost', 0):.6f}")
+        result = {"shorts": clean}
+        if cost:
+            result["cost_analysis"] = cost
+        return result
+    except gemini_worker.GeminiBlockedError as e:
+        print(f"🚫 {e}")
+        raise
+    except Exception as e:
+        print(f"❌ Vision (frames) error: {e}")
+        return None
 
 
 if __name__ == '__main__':

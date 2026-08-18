@@ -40,10 +40,14 @@ function saveCache(url, analysis, webResearch, scripts) {
   } catch { /* localStorage full */ }
 }
 
-export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId, managed = false }) {
+export default function SaaShortsTab({ geminiApiKey, aiProvider = 'openrouter', elevenLabsKey, falKey, uploadPostKey, uploadUserId, managed = false }) {
   // Managed (hosted plan): Gemini (script) + Upload-Post run server-side via the
   // bearer token — no BYOK Gemini key needed. fal.ai + ElevenLabs stay BYOK.
-  const geminiHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
+  // SaaS analysis hits Google Search grounding — never send an OpenRouter key.
+  const geminiHeader = {
+    'X-AI-Provider': 'gemini',
+    ...(aiProvider === 'gemini' && geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {}),
+  };
   const needsGeminiKey = !geminiApiKey && !managed;
   // Wizard state
   const [step, setStep] = useState(() => {

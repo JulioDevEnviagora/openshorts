@@ -210,9 +210,10 @@ Async job queue with semaphore-based concurrency control. Configure via `MAX_CON
 - `OPENPANEL_CLIENT_ID`, `OPENPANEL_CLIENT_SECRET` - Optional **server-side** analytics (`cloud/analytics.py`), same opt-in rule: unset means a silent no-op. Reports job outcomes with the user's job index, which the browser cannot do reliably — a render finishes after the tab is often gone, and ad-blockers eat a share of client events. Needs a *write* client; the read client used for querying is a different credential.
 
 **Client-side (localStorage, encrypted):**
-- `OPENROUTER_API_KEY` - OpenRouter API key (required for the podcast clip path)
+- `AI_PROVIDER` - `openrouter` or `gemini`. Gemini keys only go to Google; OpenRouter keys only go to openrouter.ai.
+- `OPENROUTER_API_KEY` - OpenRouter API key (never sent to Google)
 - `OPENROUTER_MODEL` - Optional OpenRouter model id (default `google/gemini-2.5-flash`; bare `gemini-*` maps to `google/<name>`)
-- `GEMINI_API_KEY` - Fallback if `OPENROUTER_API_KEY` is unset
+- `GEMINI_API_KEY` - Google AI Studio key (never sent to openrouter.ai; not a fallback for OpenRouter)
 - `ELEVENLABS_API_KEY` - ElevenLabs API key for voice dubbing (optional)
 - `UPLOAD_POST_API_KEY` - Upload-Post API key for social posting (optional)
 

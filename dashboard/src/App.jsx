@@ -23,6 +23,7 @@ import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
+import { loadAiSettings, persistAiSettings, selectedAiKey, aiHeaders } from './lib/aiKeys';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -183,7 +184,14 @@ function App() {
   // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
   const [durableClips, setDurableClips] = useState({});
 
-  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [aiProvider, setAiProvider] = useState(() => loadAiSettings().provider);
+  const [openrouterKey, setOpenrouterKey] = useState(() => loadAiSettings().openrouterKey);
+  const [geminiNativeKey, setGeminiNativeKey] = useState(() => loadAiSettings().geminiKey);
+  const apiKey = selectedAiKey({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
+  const setSelectedAiKey = (value) => {
+    if (aiProvider === 'gemini') setGeminiNativeKey(value);
+    else setOpenrouterKey(value);
+  };
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -466,10 +474,8 @@ function App() {
   }, [jobId, status, results, activeTab, noSource, projectState]);
 
   useEffect(() => {
-    // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
-    // For now keeping gemini plain for compatibility unless requested.
-    if (apiKey) localStorage.setItem('gemini_key', apiKey);
-  }, [apiKey]);
+    persistAiSettings({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
+  }, [aiProvider, openrouterKey, geminiNativeKey]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -645,7 +651,7 @@ function App() {
       let body;
       // BYOK sends the Gemini header; managed users rely on the bearer token
       // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      const headers = aiHeaders({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -864,9 +870,9 @@ function App() {
                 <AlertTriangle size={12} />
                 <span className="hidden sm:inline">
                   {!apiKey && !uploadPostKey
-                    ? 'OpenRouter & Upload-Post keys missing'
+                    ? 'AI & Upload-Post keys missing'
                     : !apiKey
-                      ? 'OpenRouter API Key Missing'
+                      ? `${aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'} API Key Missing`
                       : 'Upload-Post API Key Missing'}
                 </span>
                 <span className="sm:hidden">keys missing</span>
@@ -884,9 +890,9 @@ function App() {
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
                   {!apiKey && !uploadPostKey
-                    ? 'Set your OpenRouter and Upload-Post API keys to use OpenShorts.'
+                    ? `Set your ${aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'} and Upload-Post API keys to use OpenShorts.`
                     : !apiKey
-                      ? 'Set your OpenRouter API key to use OpenShorts.'
+                      ? `Set your ${aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'} API key to use OpenShorts.`
                       : 'Set your Upload-Post API key to use OpenShorts.'}
                 </span>
               </div>
@@ -980,7 +986,14 @@ function App() {
                 </div>
               ) : (
                 <>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <KeyInput
+                provider={aiProvider}
+                onProviderChange={setAiProvider}
+                openrouterKey={openrouterKey}
+                geminiKey={geminiNativeKey}
+                onOpenrouterKeySet={setOpenrouterKey}
+                onGeminiKeySet={setGeminiNativeKey}
+              />
 
               <div className="card p-4 sm:p-6 mt-8">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -1156,7 +1169,7 @@ function App() {
 
           {/* View: SaaS Shorts */}
           {activeTab === 'saasshorts' && (
-            <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+            <SaaShortsTab geminiApiKey={geminiNativeKey} aiProvider="gemini" elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
           )}
 
           {/* View: AI Agent */}
@@ -1294,7 +1307,7 @@ function App() {
           )}
 
           {activeTab === 'thumbnails' && (
-            <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+            <ThumbnailStudio geminiApiKey={apiKey} aiProvider={aiProvider} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
           )}
 
           {/* View: Gallery */}
@@ -1465,6 +1478,7 @@ function App() {
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
+                          aiProvider={aiProvider}
                           elevenLabsKey={elevenLabsKey}
                           isManaged={isManaged}
                           connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
@@ -1507,7 +1521,7 @@ function App() {
         title={!apiKey && !uploadPostKey
           ? 'Required API Keys Missing'
           : !apiKey
-            ? 'OpenRouter API Key Required'
+            ? `${aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'} API Key Required`
             : 'Upload-Post API Key Required'}
         footer={
           <div className="flex gap-3">
@@ -1528,29 +1542,29 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both an <strong className="text-ink2">OpenRouter</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            OpenShorts needs an <strong className="text-ink2">{aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'}</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Switch provider in Settings. Gemini keys only go to Google; OpenRouter keys only go to openrouter.ai.
           </p>
 
-          {/* Gemini block */}
+          {/* AI key block */}
           <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
               {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              OpenRouter API Key {apiKey && <span className="text-ok">— set</span>}
+              {aiProvider === 'gemini' ? 'Gemini' : 'OpenRouter'} API Key {apiKey && <span className="text-ok">— set</span>}
             </p>
             {!apiKey && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Go to <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">openrouter.ai/keys</a></li>
+                  <li>Go to <a href={aiProvider === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://openrouter.ai/keys'} target="_blank" rel="noopener noreferrer" className="text-brass underline">{aiProvider === 'gemini' ? 'aistudio.google.com/apikey' : 'openrouter.ai/keys'}</a></li>
                   <li>Create an API key</li>
                   <li>Copy the key and paste it below</li>
                 </ol>
                 <input
                   type="text"
-                  placeholder="Paste your OpenRouter API key here..."
+                  placeholder={aiProvider === 'gemini' ? 'Paste your Gemini API key here...' : 'Paste your OpenRouter API key here...'}
                   className="input-field"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && e.target.value.trim()) {
-                      setApiKey(e.target.value.trim());
+                      setSelectedAiKey(e.target.value.trim());
                     }
                   }}
                 />

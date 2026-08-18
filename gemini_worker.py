@@ -16,19 +16,125 @@ load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+PROVIDERS = ("openrouter", "gemini")
 
-# File API callers (silent-video vision, editor, thumbnails) still need
-# google.genai. OpenRouter has no equivalent video-upload stack.
-FILE_API_UNAVAILABLE = (
-    "This feature still uses the Google Gemini File API (video upload) and is "
-    "not available via OpenRouter. Use a video with speech for the podcast "
-    "path, or keep a Google AI Studio key for this feature."
+# Native Imagen / flash-image — OpenRouter cannot do this.
+GEMINI_IMAGE_ONLY = (
+    "Thumbnail image generation uses Gemini's native image model and is not "
+    "available via OpenRouter. Switch the provider to Gemini."
 )
 
 
+def looks_like_ai_studio_key(key: Optional[str]) -> bool:
+    return (key or "").strip().startswith("AIza")
+
+
+def looks_like_openrouter_key(key: Optional[str]) -> bool:
+    raw = (key or "").strip()
+    return raw.startswith("sk-or-") or raw.startswith("sk-orv-")
+
+
+def openrouter_key() -> Optional[str]:
+    """Only ``OPENROUTER_API_KEY``. Never an AI Studio ``AIza…`` token."""
+    key = (os.getenv("OPENROUTER_API_KEY") or "").strip() or None
+    if key and looks_like_ai_studio_key(key):
+        return None
+    return key
+
+
+def gemini_key() -> Optional[str]:
+    """Only ``GEMINI_API_KEY``. Never an OpenRouter ``sk-or-`` token."""
+    key = (os.getenv("GEMINI_API_KEY") or "").strip() or None
+    if key and looks_like_openrouter_key(key):
+        return None
+    return key
+
+
+def assert_openrouter_safe_key(key: Optional[str]) -> str:
+    raw = (key or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "Set OPENROUTER_API_KEY before calling OpenRouter. "
+            "A Google AI Studio key (GEMINI_API_KEY / AIza…) is never sent to openrouter.ai."
+        )
+    if looks_like_ai_studio_key(raw):
+        raise RuntimeError(
+            "Gemini AI Studio keys (AIza…) cannot be sent to OpenRouter. "
+            "Use OPENROUTER_API_KEY or switch AI_PROVIDER=gemini."
+        )
+    return raw
+
+
+def assert_google_safe_key(key: Optional[str]) -> str:
+    raw = (key or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "Set GEMINI_API_KEY before using the native Gemini client. "
+            "An OpenRouter key is never sent to generativelanguage.googleapis.com."
+        )
+    if looks_like_openrouter_key(raw):
+        raise RuntimeError(
+            "OpenRouter keys (sk-or-…) cannot be sent to Google Gemini. "
+            "Set a Google AI Studio key (AIza…) or switch AI_PROVIDER=openrouter."
+        )
+    return raw
+
+
+def resolve_provider() -> str:
+    """``AI_PROVIDER`` if set, else infer from which *usable* key is present.
+
+    OpenRouter when ``OPENROUTER_API_KEY`` is a real OpenRouter key; Gemini
+    when ``GEMINI_API_KEY`` is a usable Google key. Keys are never crossed.
+    """
+    raw = (os.getenv("AI_PROVIDER") or "").strip().lower()
+    if raw in PROVIDERS:
+        return raw
+    if openrouter_key():
+        return "openrouter"
+    if gemini_key():
+        return "gemini"
+    return "openrouter"
+
+
 def resolve_api_key() -> Optional[str]:
-    """OPENROUTER_API_KEY, then GEMINI_API_KEY so existing BYOK still works."""
-    return (os.getenv("OPENROUTER_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip() or None
+    """Key for the active provider only. Never crosses Gemini ↔ OpenRouter."""
+    if resolve_provider() == "gemini":
+        return gemini_key()
+    return openrouter_key()
+
+
+def apply_ai_keys_to_env(
+    env: dict,
+    provider: Optional[str] = None,
+    byok_key: Optional[str] = None,
+) -> dict:
+    """Write isolated keys into a job env. Never copies Gemini↔OpenRouter.
+
+    OpenRouter jobs keep ``OPENROUTER_API_KEY`` (host compose or BYOK) and
+    drop ``GEMINI_API_KEY`` so a worker cannot leak an AI Studio token.
+    Gemini jobs keep ``GEMINI_API_KEY`` and drop ``OPENROUTER_API_KEY``.
+    ``MANAGED_GEMINI_API_KEY`` is never copied into ``OPENROUTER_API_KEY``.
+    """
+    chosen = (provider or "").strip().lower()
+    if chosen not in PROVIDERS:
+        chosen = resolve_provider()
+    env["AI_PROVIDER"] = chosen
+    byok = (byok_key or "").strip() or None
+
+    if chosen == "openrouter":
+        env.pop("GEMINI_API_KEY", None)
+        if byok:
+            env["OPENROUTER_API_KEY"] = assert_openrouter_safe_key(byok)
+        elif looks_like_ai_studio_key(env.get("OPENROUTER_API_KEY") or ""):
+            env.pop("OPENROUTER_API_KEY", None)
+    else:
+        env.pop("OPENROUTER_API_KEY", None)
+        if byok:
+            env["GEMINI_API_KEY"] = assert_google_safe_key(byok)
+        elif looks_like_openrouter_key(env.get("GEMINI_API_KEY") or ""):
+            env.pop("GEMINI_API_KEY", None)
+    return env
 
 
 def map_model_id(name: str) -> str:
@@ -40,17 +146,20 @@ def map_model_id(name: str) -> str:
 
 
 def resolve_model(explicit: Optional[str] = None) -> str:
-    """OPENROUTER_MODEL, then GEMINI_MODEL, then google/gemini-2.5-flash."""
+    """Model id for the active provider."""
+    if resolve_provider() == "gemini":
+        raw = (explicit or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()
+        if raw.startswith("google/"):
+            raw = raw.split("/", 1)[1]
+        return raw or DEFAULT_GEMINI_MODEL
     raw = (explicit or os.getenv("OPENROUTER_MODEL") or os.getenv("GEMINI_MODEL")
            or DEFAULT_OPENROUTER_MODEL)
     return map_model_id(str(raw).strip() or DEFAULT_OPENROUTER_MODEL)
 
 
 def openrouter_client(api_key: Optional[str] = None) -> OpenAI:
-    key = api_key if api_key is not None else resolve_api_key()
-    if not key:
-        raise RuntimeError(
-            "Missing OPENROUTER_API_KEY (or GEMINI_API_KEY fallback).")
+    key = assert_openrouter_safe_key(
+        api_key if api_key is not None else openrouter_key())
     return OpenAI(
         base_url=OPENROUTER_BASE_URL,
         api_key=key,
@@ -62,6 +171,34 @@ def openrouter_client(api_key: Optional[str] = None) -> OpenAI:
             "X-Title": os.getenv("OPENROUTER_APP_TITLE", "OpenShorts"),
         },
     )
+
+
+def gemini_client(api_key: Optional[str] = None):
+    """Native Google AI Studio client. Refuses OpenRouter keys."""
+    if resolve_provider() != "gemini":
+        raise RuntimeError(
+            "Refusing to construct google.genai while AI_PROVIDER=openrouter "
+            "(would send the key to generativelanguage.googleapis.com).")
+    key = assert_google_safe_key(
+        api_key if api_key is not None else gemini_key())
+    from google import genai
+    return genai.Client(api_key=key)
+
+
+def make_client(api_key: Optional[str] = None, provider: Optional[str] = None):
+    """Build the client for ``provider`` (or the process default).
+
+    An explicit provider wins over ``AI_PROVIDER`` so in-process request
+    handlers can honour ``X-AI-Provider`` without mutating the server env.
+    Keys are still isolated: Gemini keys never go to OpenRouter and vice versa.
+    """
+    chosen = (provider or "").strip().lower() or resolve_provider()
+    if chosen == "gemini":
+        from google import genai
+        key = assert_google_safe_key(
+            api_key if api_key is not None else gemini_key())
+        return genai.Client(api_key=key)
+    return openrouter_client(api_key)
 
 
 def jpeg_image_url_parts(frames: List[bytes]) -> list:
@@ -589,13 +726,43 @@ def _parse_structured_payload(raw_text: str, schema: Optional[type] = None) -> d
     return data
 
 
-def complete_json(client, model_name, prompt, schema, strategy="structured-schema",
-                  mode="score", messages=None):
-    """One OpenRouter chat completion that must return JSON matching schema.
+def _is_openrouter_client(client) -> bool:
+    chat = getattr(client, "chat", None)
+    return chat is not None and getattr(chat, "completions", None) is not None
 
-    ``messages`` overrides the default single user prompt (used for image parts).
-    Returns ``(parsed_dict, response)``.
-    """
+
+def complete_gemini_json(client, model_name, prompt, schema, strategy="structured-schema",
+                         mode="score", contents=None):
+    """Native google.genai generate_content with the original schema path."""
+    from google.genai import types as genai_types
+
+    kwargs = {
+        "response_mime_type": "application/json",
+        "candidate_count": 1,
+        "temperature": _temperature_for_strategy(strategy, mode),
+    }
+    if strategy == "structured-schema" and schema is not None:
+        kwargs["response_schema"] = schema
+    config = genai_types.GenerateContentConfig(**kwargs)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=contents if contents is not None else prompt,
+        config=config,
+    )
+    raise_if_blocked(response)
+    raw_text = _get_response_text(response)
+    parsed_obj = getattr(response, "parsed", None)
+    if parsed_obj is not None:
+        parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+        if isinstance(parsed, dict):
+            return parsed, response
+    parsed = _parse_structured_payload(raw_text, schema)
+    return parsed, response
+
+
+def complete_openrouter_json(client, model_name, prompt, schema, strategy="structured-schema",
+                             mode="score", messages=None):
+    """OpenRouter chat.completions.create with response_format."""
     if messages is None:
         messages = [{"role": "user", "content": prompt}]
     kwargs = {
@@ -618,10 +785,42 @@ def complete_json(client, model_name, prompt, schema, strategy="structured-schem
     return parsed, response
 
 
+def complete_json(client, model_name, prompt, schema, strategy="structured-schema",
+                  mode="score", messages=None, contents=None):
+    """One structured JSON call on whichever client ``make_client`` built.
+
+    OpenRouter uses ``messages`` (image_url data URIs). Native Gemini uses
+    ``contents`` (File API objects or Part bytes). Returns ``(parsed_dict, response)``.
+    """
+    if _is_openrouter_client(client):
+        return complete_openrouter_json(
+            client, model_name, prompt, schema, strategy=strategy, mode=mode,
+            messages=messages)
+    return complete_gemini_json(
+        client, model_name, prompt, schema, strategy=strategy, mode=mode,
+        contents=contents)
+
+
+def complete_json_with_frames(client, model_name, prompt, schema, frames,
+                              strategy="structured-schema", mode="score"):
+    """Send JPEG bytes as chat image_url data URIs (OpenRouter) or Parts (Gemini)."""
+    if _is_openrouter_client(client):
+        content = jpeg_image_url_parts(frames)
+        content.append({"type": "text", "text": prompt})
+        return complete_openrouter_json(
+            client, model_name, prompt, schema, strategy=strategy, mode=mode,
+            messages=[{"role": "user", "content": content}])
+    from google.genai import types as genai_types
+    parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
+    return complete_gemini_json(
+        client, model_name, prompt, schema, strategy=strategy, mode=mode,
+        contents=parts + [prompt])
+
+
 def main() -> int:
     _configure_stdio()
 
-    parser = argparse.ArgumentParser(description="Run a single OpenRouter request for clip scoring/detailing.")
+    parser = argparse.ArgumentParser(description="Run a single clip scoring/detailing request.")
     parser.add_argument("--mode", choices=["score", "detail"], required=True)
     parser.add_argument("--input", dest="input_path", required=True)
     parser.add_argument("--output", dest="output_path", required=True)
@@ -631,13 +830,14 @@ def main() -> int:
 
     api_key = resolve_api_key()
     if not api_key:
-        raise SystemExit("Missing OPENROUTER_API_KEY (or GEMINI_API_KEY fallback).")
+        raise SystemExit("Missing API key for the active AI provider.")
 
     with open(args.input_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
     model_name = resolve_model(args.model)
-    client = openrouter_client(api_key)
+    client = make_client(api_key)
+    provider = resolve_provider()
     language = str(payload.get("language") or "unknown")
 
     template = SCORE_PROMPT_TEMPLATE if args.mode == "score" else DETAIL_PROMPT_TEMPLATE
@@ -655,7 +855,7 @@ def main() -> int:
         fmt["min_secs"], fmt["max_secs"] = clip_duration_bounds()
     prompt = template.format(**fmt)
 
-    _log(f"🤖 OpenRouter worker request: mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
+    _log(f"🤖 Worker request: provider={provider} mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
     parsed, response = complete_json(
         client, model_name, prompt, schema, strategy=args.strategy, mode=args.mode)
     raw_text = _get_response_text(response)
@@ -667,7 +867,7 @@ def main() -> int:
     }
     with open(args.output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
-    _log(f"✅ OpenRouter worker success: mode={args.mode}")
+    _log(f"✅ Worker success: provider={provider} mode={args.mode}")
     return 0
 
 
