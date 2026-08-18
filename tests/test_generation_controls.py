@@ -47,7 +47,7 @@ class TestClipDurationBounds:
 
 def _templates():
     """The prompt template constants, read without importing gemini_worker
-    (which pulls google-genai — absent in the thin CI env)."""
+    (which pulls openai — kept out of this file so CI stays thin)."""
     mod = ast.parse(open(os.path.join(os.path.dirname(__file__), "..",
                                       "gemini_worker.py")).read())
     return {

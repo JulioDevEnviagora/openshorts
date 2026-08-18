@@ -183,7 +183,7 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 ## Requirements
 
 - **Docker & Docker Compose**
-- **Google Gemini API Key** ([Free — get it here](https://aistudio.google.com/app/apikey)) — required for all AI features
+- **OpenRouter API Key** ([openrouter.ai/keys](https://openrouter.ai/keys)) **or** **Google AI Studio key** — pick the provider in Settings (`AI_PROVIDER`). Gemini keys only go to Google; OpenRouter keys only go to openrouter.ai. Never mix them.
 - **fal.ai API Key** ([Pay-per-use](https://fal.ai)) — required for AI Shorts (actor generation, video, lip-sync)
 - **ElevenLabs API Key** ([Free tier](https://elevenlabs.io)) — required for voiceover/dubbing
 - **Upload-Post API Key** ([free tier](https://upload-post.com)) — required for direct social posting
@@ -354,7 +354,10 @@ lives in [`examples/n8n/`](examples/n8n/).
 **Client-side (encrypted in localStorage):**
 | Key | Description |
 |-----|------------|
-| `GEMINI_API_KEY` | Google Gemini — required |
+| `AI_PROVIDER` | `openrouter` or `gemini`. Keys are never crossed. |
+| `OPENROUTER_API_KEY` | OpenRouter only — never sent to Google |
+| `OPENROUTER_MODEL` | Optional. Default `google/gemini-2.5-flash`. Bare `gemini-*` ids map to `google/<name>` on OpenRouter |
+| `GEMINI_API_KEY` | Google AI Studio only — never sent to openrouter.ai |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
 | `UPLOAD_POST_API_KEY` | Upload-Post — required, for social posting |

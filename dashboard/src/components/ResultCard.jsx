@@ -35,7 +35,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null }) {
+export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostKey, uploadUserId, geminiApiKey, aiProvider = 'openrouter', aiProviderExplicit = false, billingEnabled = false, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -208,14 +208,20 @@ export default function ResultCard({ clip, index, jobId, durableUrl, uploadPostK
         setIsEditing(true);
         setEditError(null);
         try {
-            const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
+            const apiKey = geminiApiKey;
+            const isGemini = aiProvider === 'gemini';
 
-            // Managed (paid) users get the Gemini key resolved server-side;
-            // only BYOK/self-host needs a local key.
+            // Managed (paid) users get the server key resolved server-side;
+            // only BYOK/self-host needs a local key for the selected provider.
             if (!apiKey && !isManaged) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
+                throw new Error(`${isGemini ? 'Gemini' : 'OpenRouter'} API Key is missing. Please set it in Settings.`);
             }
-            const geminiHeaders = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+            const geminiHeaders = {
+                ...(apiKey ? { 'X-Gemini-Key': apiKey } : {}),
+            };
+            if (aiProviderExplicit || billingEnabled === false) {
+                geminiHeaders['X-AI-Provider'] = aiProvider;
+            }
 
             // Try Remotion effects endpoint first
             const effectsRes = hasServerBurns ? null : await apiFetch('/api/effects/generate', {

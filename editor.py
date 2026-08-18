@@ -25,30 +25,34 @@ class EditPlan(BaseModel):
 
 
 class VideoEditor:
-    def __init__(self, api_key):
-        self.client = genai.Client(api_key=api_key)
-        self.model_name = (
-            os.environ.get("GEMINI_MODEL_EDITOR")
-            or os.environ.get("GEMINI_MODEL")
-            or "gemini-3.1-flash-lite"
-        )
+    def __init__(self, api_key, provider=None):
+        import gemini_worker
+        self.api_key = api_key
+        # Gemini-native UI default. Do not inherit process-level OpenRouter
+        # just because compose has OPENROUTER_API_KEY.
+        chosen = (provider or "").strip().lower()
+        self.provider = chosen if chosen in gemini_worker.PROVIDERS else "gemini"
+        self.client = gemini_worker.make_client(api_key, provider=self.provider)
+        editor_model = os.environ.get("GEMINI_MODEL_EDITOR")
+        self.model_name = gemini_worker.resolve_model(
+            explicit=editor_model, provider=self.provider)
+        self._openrouter_video_path = None
 
     def upload_video(self, video_path):
-        """Uploads video to Gemini File API."""
-        print(f"📤 Uploading {video_path} to Gemini...")
-        
-        # Ensure we are passing a path that exists
+        """Gemini File API, or remember the path for OpenRouter frame sampling."""
+        import gemini_worker
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
-            
-        # Using 'file' keyword instead of 'path'
+        if self.provider == "openrouter":
+            self._openrouter_video_path = video_path
+            print("🖼️  OpenRouter: will sample frames instead of uploading the file.")
+            return video_path
+        print(f"📤 Uploading {video_path} to Gemini...")
         try:
             file_upload = self.client.files.upload(file=video_path)
         except Exception as e:
             print(f"❌ Gemini Upload Error: {e}")
             raise e
-        
-        # Wait for processing
         print("⏳ Waiting for video processing by Gemini...")
         deadline = time.time() + 120
         while True:
@@ -63,6 +67,20 @@ class VideoEditor:
             if time.time() > deadline:
                 raise TimeoutError("Gemini file processing timed out after 120s.")
             time.sleep(2)
+
+    def _openrouter_json(self, prompt, schema):
+        """Structured JSON via sampled frames (OpenRouter has no File API)."""
+        import gemini_worker
+        import layout_picker
+        path = self._openrouter_video_path
+        frames = layout_picker.sample_frames(path) if path else []
+        if frames:
+            parsed, _response = gemini_worker.complete_json_with_frames(
+                self.client, self.model_name, prompt, schema, frames)
+        else:
+            parsed, _response = gemini_worker.complete_json(
+                self.client, self.model_name, prompt, schema)
+        return parsed or {}
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None, has_captions=False):
         """Asks Gemini for an edit decision list, then builds the FFmpeg filter
@@ -112,41 +130,46 @@ class VideoEditor:
         """
 
         print("🤖 Asking Gemini for an edit decision list...")
-        # Low media resolution: Gemini samples at 1 FPS and normalizes frames to
-        # fixed token sizes, so "low" (~70 tokens/frame) cuts video-input cost
-        # without hurting motion/scene understanding. Fall back to defaults if
-        # the SDK or model rejects the option.
-        try:
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=EditPlan,
-                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
-            )
-        except Exception:
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=EditPlan,
-            )
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[video_file_obj, prompt],
-                config=config,
-            )
-        except Exception as e:
-            if getattr(config, "media_resolution", None) is None:
-                raise
-            print(f"⚠️ media_resolution=low rejected ({e}); retrying with defaults...")
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[video_file_obj, prompt],
-                config=types.GenerateContentConfig(
+        if self.provider == "openrouter":
+            raw_edits = self._openrouter_json(prompt, EditPlan).get("edits")
+            if raw_edits is None:
+                return None
+        else:
+            # Low media resolution: Gemini samples at 1 FPS and normalizes frames to
+            # fixed token sizes, so "low" (~70 tokens/frame) cuts video-input cost
+            # without hurting motion/scene understanding. Fall back to defaults if
+            # the SDK or model rejects the option.
+            try:
+                config = types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=EditPlan,
-                ),
-            )
+                    media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
+                )
+            except Exception:
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=EditPlan,
+                )
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[video_file_obj, prompt],
+                    config=config,
+                )
+            except Exception as e:
+                if getattr(config, "media_resolution", None) is None:
+                    raise
+                print(f"⚠️ media_resolution=low rejected ({e}); retrying with defaults...")
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[video_file_obj, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=EditPlan,
+                    ),
+                )
 
-        raw_edits = self._extract_edits(response)
+            raw_edits = self._extract_edits(response)
         if raw_edits is None:
             return None
 
@@ -218,6 +241,9 @@ class VideoEditor:
         """
 
         print("🤖 Asking Gemini for Remotion effects config...")
+        if self.provider == "openrouter":
+            parsed = self._openrouter_json(prompt, None)
+            return parsed if isinstance(parsed, dict) else None
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=[video_file_obj, prompt],
@@ -383,6 +409,12 @@ class VideoEditor:
         Output JSON only: {{"filter_string": "..."}}
         """
         try:
+            if self.provider == "openrouter":
+                import gemini_worker
+                parsed, _response = gemini_worker.complete_json(
+                    self.client, self.model_name, prompt, None)
+                repaired = (parsed or {}).get("filter_string")
+                return repaired if isinstance(repaired, str) and repaired.strip() else None
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,

@@ -41,7 +41,6 @@ whole-video mode already has, at 2.2s per clip instead of ~15s.
 Off by default (``AUTO_LAYOUT=1``). A caller that already switched layouts on
 by hand wins: this only ever ADDS, so an explicit choice is never overridden.
 """
-import json
 import os
 
 # AUTO_LAYOUT=1 decides and applies. AUTO_LAYOUT=shadow decides, logs, and
@@ -136,36 +135,29 @@ def pick(video_path, video_duration):
     """
     if not ENABLED:
         return "none"
-    api_key = os.getenv("GEMINI_API_KEY")
+    try:
+        import gemini_worker
+    except Exception:
+        return "none"
+    api_key = gemini_worker.resolve_api_key()
     if not api_key:
         return "none"
 
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    model_name = gemini_worker.resolve_model()
     print("🎛️  Choosing a layout for this video…")
     try:
         # Inside the try on purpose: the contract above is that this never
         # raises, and an unimportable SDK is just one more reason to fall back.
-        from google import genai
-        from google.genai import types as genai_types
-        import gemini_worker
-
         frames = sample_frames(video_path)
         if not frames:
             print("   ⚠️ No readable frames — keeping the default layout.")
             return "none"
 
-        client = genai.Client(api_key=api_key)
-        parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
-                 for b in frames]
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.LayoutChoice,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        answer = json.loads(response.text) or {}
+        client = gemini_worker.make_client(api_key)
+        parsed, _response = gemini_worker.complete_json_with_frames(
+            client, model_name, gemini_worker.LAYOUT_CHOICE_PROMPT,
+            gemini_worker.LayoutChoice, frames)
+        answer = parsed or {}
     except Exception as e:
         print(f"   ⚠️ Layout choice failed ({e}) — keeping the default layout.")
         return "none"

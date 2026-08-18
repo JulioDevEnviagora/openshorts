@@ -172,41 +172,55 @@ def detect_content_ranges(video_path, video_duration):
     """
     if not ENABLED:
         return []
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return []
-
-    from google import genai
-    from google.genai import types as genai_types
     import gemini_worker
-
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    provider = gemini_worker.resolve_provider()
+    prompt = gemini_worker.WIDE_CONTENT_PROMPT_TEMPLATE.format(
+        video_duration=video_duration)
     print("🔎 Checking for full-width on-screen content…")
     try:
-        client = genai.Client(api_key=api_key)
-        file_upload = client.files.upload(file=video_path)
-        deadline = time.time() + 180
-        while True:
-            info = client.files.get(name=file_upload.name)
-            state = str(getattr(getattr(info, "state", info), "name", "")).upper()
-            if state == "ACTIVE":
-                break
-            if state == "FAILED" or time.time() > deadline:
-                print("   ⚠️ Upload not usable — keeping face-only routing.")
+        if provider == "openrouter":
+            api_key = gemini_worker.openrouter_key()
+            if not api_key:
                 return []
-            time.sleep(2)
+            import layout_picker
+            frames = layout_picker.sample_frames(video_path)
+            if not frames:
+                print("   ⚠️ No readable frames — keeping face-only routing.")
+                return []
+            client = gemini_worker.openrouter_client(api_key)
+            parsed, _response = gemini_worker.complete_json_with_frames(
+                client, gemini_worker.resolve_model(), prompt,
+                gemini_worker.WideContentResponse, frames)
+            raw = (parsed or {}).get("ranges") or []
+        else:
+            api_key = gemini_worker.gemini_key()
+            if not api_key:
+                return []
+            from google import genai
+            from google.genai import types as genai_types
+            model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+            client = genai.Client(api_key=api_key)
+            file_upload = client.files.upload(file=video_path)
+            deadline = time.time() + 180
+            while True:
+                info = client.files.get(name=file_upload.name)
+                state = str(getattr(getattr(info, "state", info), "name", "")).upper()
+                if state == "ACTIVE":
+                    break
+                if state == "FAILED" or time.time() > deadline:
+                    print("   ⚠️ Upload not usable — keeping face-only routing.")
+                    return []
+                time.sleep(2)
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[file_upload,
-                      gemini_worker.WIDE_CONTENT_PROMPT_TEMPLATE.format(
-                          video_duration=video_duration)],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.WideContentResponse,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        raw = (json.loads(response.text) or {}).get("ranges") or []
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[file_upload, prompt],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=gemini_worker.WideContentResponse,
+                ))
+            gemini_worker.raise_if_blocked(response)
+            raw = (json.loads(response.text) or {}).get("ranges") or []
     except Exception as e:
         print(f"   ⚠️ On-screen check failed ({e}) — keeping face-only routing.")
         return []

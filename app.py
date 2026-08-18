@@ -89,23 +89,61 @@ async def _user_from_request(request: Request):
     return await get_current_user_optional(request)
 
 
-async def resolve_gemini(request: Request) -> Optional[str]:
-    """Resolve the Gemini API key for a request.
+def request_ai_provider(request: Request) -> str:
+    """Provider for this request.
 
-    Cloud (hosted) is PAID-ONLY: there is no BYOK for the core pipeline, so the
-    ``X-Gemini-Key`` header is ignored — an entitled user (active plan or trial)
-    gets the managed server key, everyone else gets ``None`` (→ 402, start trial).
-    Self-host keeps BYOK: header wins, else the env fallback.
+    ``X-AI-Provider`` wins when present. Cloud/billing otherwise stays on
+    managed Gemini — compose ``OPENROUTER_API_KEY`` must not silently steal
+    the job. Self-host without a header still infers from env keys.
     """
+    import gemini_worker
+    header = request.headers.get("X-AI-Provider")
+    return gemini_worker.resolve_request_provider(header, billing=BILLING_ENABLED)
+
+
+async def resolve_gemini(request: Request) -> Optional[str]:
+    """Resolve a *Gemini* key for Google-native endpoints.
+
+    Never returns an OpenRouter token (``sk-or-…``). Cloud is paid-only: the
+    ``X-Gemini-Key`` header is ignored and an entitled user gets
+    ``MANAGED_GEMINI_API_KEY``. Self-host: header if it is not an OpenRouter
+    key, else ``GEMINI_API_KEY``.
+    """
+    import gemini_worker
     if BILLING_ENABLED:
         user = await _user_from_request(request)
         if managed_keys.has_active_entitlement(user):
             return managed_keys.gemini_key()
         return None
-    header = request.headers.get("X-Gemini-Key")
+    header = (request.headers.get("X-Gemini-Key") or "").strip() or None
+    if header and gemini_worker.looks_like_openrouter_key(header):
+        return None
     if header:
         return header
-    return os.environ.get("GEMINI_API_KEY")
+    return gemini_worker.gemini_key()
+
+
+async def resolve_pipeline_key(request: Request) -> Optional[str]:
+    """Key for the clip pipeline's selected provider. Isolated: Gemini keys
+    never go to OpenRouter, OpenRouter keys never go to Google.
+    """
+    import gemini_worker
+    provider = request_ai_provider(request)
+    if BILLING_ENABLED:
+        user = await _user_from_request(request)
+        if not managed_keys.has_active_entitlement(user):
+            return None
+        if provider == "openrouter":
+            return gemini_worker.openrouter_key()
+        return managed_keys.gemini_key()
+    header = (request.headers.get("X-Gemini-Key") or "").strip() or None
+    if provider == "openrouter":
+        if header and gemini_worker.looks_like_ai_studio_key(header):
+            return None
+        return header or gemini_worker.openrouter_key()
+    if header and gemini_worker.looks_like_openrouter_key(header):
+        return None
+    return header or gemini_worker.gemini_key()
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -508,7 +546,8 @@ MAX_RESUME_ATTEMPTS = 2
 
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
-                           webhook_url=None, webhook_secret=None, base_url=None):
+                           webhook_url=None, webhook_secret=None, base_url=None,
+                           ai_provider=None):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -517,6 +556,7 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "user_id": None if user_id is None else str(user_id),
                 "reservation_id": reservation_id,
                 "watermark": bool(watermark), "attempts": 0,
+                "ai_provider": ai_provider,
                 # The caller's webhook must survive a redeploy: a pipeline that
                 # relies on the callback would otherwise hang forever on a job
                 # that resumed fine. The secret is the caller's own HMAC value,
@@ -586,14 +626,23 @@ def _resume_interrupted_jobs() -> set:
             _clear_resume_manifest(job_id)
             continue
 
-        # Rebuild env from scratch — the manifest holds no secrets. Managed
-        # (cloud) jobs get the server key; self-host falls back to its env key.
+        # Rebuild env from scratch — the manifest holds no secrets. Keys stay
+        # isolated: managed Gemini is never copied into OPENROUTER_API_KEY.
+        # OpenRouter jobs keep the compose-cloud OPENROUTER_API_KEY.
         env = os.environ.copy()
-        if BILLING_ENABLED and user_id is not None:
+        import gemini_worker
+        provider = (m.get("ai_provider") or "").strip().lower()
+        if provider not in gemini_worker.PROVIDERS:
+            provider = gemini_worker.resolve_provider()
+        if BILLING_ENABLED and user_id is not None and provider == "gemini":
             try:
                 env["GEMINI_API_KEY"] = managed_keys.gemini_key()
             except Exception:
                 pass
+        try:
+            gemini_worker.apply_ai_keys_to_env(env, provider)
+        except RuntimeError:
+            pass
         if m.get("watermark"):
             env["WATERMARK"] = "1"
         else:
@@ -1454,7 +1503,9 @@ async def process_endpoint(
     clip_min_seconds: Optional[str] = Form(None),
     clip_max_seconds: Optional[str] = Form(None)
 ):
-    api_key = await resolve_gemini(request)
+    import gemini_worker
+    provider = request_ai_provider(request)
+    api_key = await resolve_pipeline_key(request)
     if not api_key:
         raise gemini_missing_error()
 
@@ -1543,7 +1594,20 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    # Isolated keys: Gemini only in GEMINI_API_KEY, OpenRouter only in
+    # OPENROUTER_API_KEY. Never copy one into the other (incl. managed Gemini).
+    header_key = (request.headers.get("X-Gemini-Key") or "").strip() or None
+    byok = None if BILLING_ENABLED else header_key
+    try:
+        gemini_worker.apply_ai_keys_to_env(env, provider, byok_key=byok)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if BILLING_ENABLED and provider == "gemini":
+        env["GEMINI_API_KEY"] = api_key
+    if provider == "openrouter" and not env.get("OPENROUTER_API_KEY"):
+        raise gemini_missing_error()
+    if provider == "gemini" and not env.get("GEMINI_API_KEY"):
+        raise gemini_missing_error()
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK
@@ -1665,7 +1729,7 @@ async def process_endpoint(
     _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id,
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
-                           base_url=api_base)
+                           base_url=api_base, ai_provider=provider)
 
     _enqueue_job(job_id, priority)
 
@@ -1938,7 +2002,8 @@ async def edit_clip(
     # the entitlement gate or metering (mirrors resolve_gemini ignoring the
     # header). Self-host keeps BYOK — the body key wins there.
     body_key = None if BILLING_ENABLED else req.api_key
-    final_api_key = body_key or await resolve_gemini(request)
+    edit_provider = request_ai_provider(request)
+    final_api_key = body_key or await resolve_pipeline_key(request)
 
     if not final_api_key:
         raise gemini_missing_error()
@@ -1990,7 +2055,7 @@ async def edit_clip(
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, provider=edit_provider)
             
             # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
             # Create a safe ASCII filename in the same directory
@@ -2501,7 +2566,8 @@ async def generate_effects_config(
     request: Request,
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
-    final_api_key = await resolve_gemini(request)
+    fx_provider = request_ai_provider(request)
+    final_api_key = await resolve_pipeline_key(request)
 
     if not final_api_key:
         raise gemini_missing_error()
@@ -2533,7 +2599,7 @@ async def generate_effects_config(
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
         def run_effects_generation():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, provider=fx_provider)
 
             # Create safe ASCII filename to avoid encoding issues
             safe_filename = f"temp_effects_{req.job_id}.mp4"
@@ -3339,6 +3405,8 @@ async def thumbnail_analyze(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Analyze a video and suggest viral YouTube titles."""
+    # Gemini-native UI: managed / AI Studio key only. Process-level
+    # OpenRouter default must not reject an AIza key here.
     api_key = await resolve_gemini(request)
     if not api_key:
         raise gemini_missing_error()
@@ -3504,6 +3572,8 @@ async def thumbnail_generate(
     background: Optional[UploadFile] = File(None),
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
+    # Gemini-native UI: managed / AI Studio key only. An OpenRouter
+    # request header must not 400 this path — ignore process default.
     api_key = await resolve_gemini(request)
     if not api_key:
         raise gemini_missing_error()
