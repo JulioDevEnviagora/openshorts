@@ -11,10 +11,16 @@ services:
       - OPENROUTER_IMAGE_MODEL=${OPENROUTER_IMAGE_MODEL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-}
+      # Writable even when `.:/app` is a root-owned Dokploy checkout (appuser
+      # cannot mkdir on that tree). Named volumes init from the image dirs and
+      # the entrypoint chowns them before dropping privileges.
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/output
     volumes:
       - .:/app
       - /app/__pycache__
-      - ./output:/app/output
+      - uploads_data:/app/uploads
+      - output_data:/app/output
     restart: unless-stopped
 
   frontend:
@@ -43,7 +49,7 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - ./output:/output
+      - output_data:/output
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
       - OUTPUT_DIR=/output
@@ -51,3 +57,7 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+volumes:
+  uploads_data:
+  output_data:
