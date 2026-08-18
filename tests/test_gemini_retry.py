@@ -102,6 +102,20 @@ def test_succeeds_without_retrying_when_the_first_call_is_fine():
     assert models.calls == 1
 
 
+def test_detail_mode_keeps_creative_temperature():
+    models = _FakeCompletions(blips=0)
+    captured = {}
+    orig = models.create
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return orig(**kwargs)
+
+    models.create = create
+    main._run_gemini_stage(_client(models), "m", "prompt", object, mode="detail")
+    assert captured.get("temperature") == 0.9
+
+
 class _BlockedResponse:
     """OpenRouter/OpenAI shape: content_filter finish_reason, empty content."""
     usage = None

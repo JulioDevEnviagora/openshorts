@@ -1174,15 +1174,17 @@ def transcribe_video(video_path):
 
     return transcript
 
-def _run_gemini_stage(client, model_name, prompt, schema):
+def _run_gemini_stage(client, model_name, prompt, schema, mode="score"):
     """One schema-enforced provider call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
+    Returns (parsed_dict, cost_analysis). ``mode`` keeps in-process detail
+    at the same creative temperature (0.9) as the worker CLI.
+    """
     max_attempts = 3
     label = gemini_worker.resolve_provider()
     for attempt in range(1, max_attempts + 1):
         try:
             parsed, response = gemini_worker.complete_json(
-                client, model_name, prompt, schema)
+                client, model_name, prompt, schema, mode=mode)
             return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
         except gemini_worker.GeminiBlockedError:
             raise  # deterministic policy block — never retry
@@ -1264,7 +1266,8 @@ def get_viral_clips(transcript_result, video_duration):
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
+        detail, cost = _run_gemini_stage(
+            client, model_name, prompt, gemini_worker.DetailResponse, mode="detail")
         if cost:
             costs.append(cost)
 
@@ -1368,7 +1371,7 @@ def get_visual_clips(video_path, video_duration, language="en"):
 
         parsed, response = gemini_worker.complete_json(
             client, model_name, prompt, gemini_worker.VisualResponse,
-            contents=[file_upload, prompt])
+            mode="detail", contents=[file_upload, prompt])
         clean = _clean_visual_shorts(parsed.get("shorts"), video_duration)
         if not clean:
             print("⚠️ Vision pass returned no usable clips.")
@@ -1404,7 +1407,8 @@ def _visual_clips_from_frames(client, model_name, video_path, video_duration, pr
     print(f"   sampled {len(frames)} JPEG frame(s) @ {layout_picker.SAMPLE_WIDTH}px")
     try:
         parsed, response = gemini_worker.complete_json_with_frames(
-            client, model_name, prompt, gemini_worker.VisualResponse, frames)
+            client, model_name, prompt, gemini_worker.VisualResponse, frames,
+            mode="detail")
         clean = _clean_visual_shorts(parsed.get("shorts"), video_duration)
         if not clean:
             print("⚠️ Vision pass returned no usable clips.")

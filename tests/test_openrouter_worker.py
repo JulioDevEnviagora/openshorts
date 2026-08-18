@@ -178,7 +178,10 @@ class TestTextRepairFallback:
 
 
 class TestUsageMapping:
-    def test_openai_usage_maps_to_cost_analysis(self):
+    def test_openai_usage_does_not_double_count_reasoning(self):
+        # OpenRouter: reasoning_tokens already sit inside completion_tokens.
+        # Bill 200, not 200+50.
+        from clip_selection import lookup_model_prices
         usage = types.SimpleNamespace(
             prompt_tokens=1000,
             completion_tokens=200,
@@ -186,14 +189,19 @@ class TestUsageMapping:
         )
         response = types.SimpleNamespace(usage=usage, usage_metadata=None)
         cost = gemini_worker._calculate_cost_analysis(response, "google/gemini-2.5-flash")
+        inp, out = lookup_model_prices("google/gemini-2.5-flash")
         assert cost["input_tokens"] == 1000
         assert cost["output_tokens"] == 200
         assert cost["thinking_tokens"] == 50
         assert cost["model"] == "google/gemini-2.5-flash"
-        assert cost["total_cost"] > 0
         assert cost["price_estimated"] is False
+        assert abs(cost["output_cost"] - (200 / 1_000_000) * out) < 1e-12
+        expected = (1000 / 1_000_000) * inp + (200 / 1_000_000) * out
+        assert abs(cost["total_cost"] - expected) < 1e-12
+        assert abs(cost["output_cost"] - (250 / 1_000_000) * out) > 1e-12
 
-    def test_legacy_gemini_usage_metadata_still_works(self):
+    def test_legacy_gemini_thoughts_are_added(self):
+        from clip_selection import lookup_model_prices
         usage = types.SimpleNamespace(
             prompt_token_count=10,
             candidates_token_count=5,
@@ -201,9 +209,28 @@ class TestUsageMapping:
         )
         response = types.SimpleNamespace(usage=None, usage_metadata=usage)
         cost = gemini_worker._calculate_cost_analysis(response, "gemini-2.5-flash")
+        _inp, out = lookup_model_prices("gemini-2.5-flash")
         assert cost["input_tokens"] == 10
         assert cost["output_tokens"] == 5
         assert cost["thinking_tokens"] == 2
+        assert abs(cost["output_cost"] - (7 / 1_000_000) * out) < 1e-12
+
+    def test_unknown_model_does_not_invent_a_rate(self):
+        usage = types.SimpleNamespace(prompt_tokens=1000, completion_tokens=200)
+        response = types.SimpleNamespace(usage=usage, usage_metadata=None)
+        cost = gemini_worker._calculate_cost_analysis(response, "anthropic/claude-sonnet-4")
+        assert cost["price_estimated"] is True
+        assert cost["input_tokens"] == 1000
+        assert cost["output_tokens"] == 200
+        assert cost["total_cost"] == 0.0
+        assert cost["input_cost"] == 0.0
+        assert cost["output_cost"] == 0.0
+
+
+class TestTemperature:
+    def test_detail_stays_creative(self):
+        assert gemini_worker._temperature_for_strategy("structured-schema", "detail") == 0.9
+        assert gemini_worker._temperature_for_strategy("structured-schema", "score") == 0.2
 
 
 class TestJpegDataUris:

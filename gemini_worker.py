@@ -638,9 +638,17 @@ def _get_response_text(response) -> str:
 
 
 def _usage_token_counts(usage) -> tuple:
-    """Map OpenAI/OpenRouter usage (or leftover Gemini usage_metadata) to tokens."""
+    """Map OpenAI/OpenRouter usage (or leftover Gemini usage_metadata) to tokens.
+
+    Returns ``(prompt, output, thinking, billed_output)``.
+
+    OpenRouter ``reasoning_tokens`` already sit inside ``completion_tokens`` —
+    they are reported as ``thinking`` but must not be added again.
+    Gemini-legacy ``thoughts_token_count`` is *not* inside
+    ``candidates_token_count`` and is the only extra that gets billed.
+    """
     if usage is None:
-        return 0, 0, 0
+        return 0, 0, 0, 0
     prompt_tokens = (
         getattr(usage, "prompt_tokens", None)
         or getattr(usage, "prompt_token_count", None)
@@ -652,25 +660,41 @@ def _usage_token_counts(usage) -> tuple:
         or 0
     )
     details = getattr(usage, "completion_tokens_details", None)
-    thinking_tokens = (
+    reasoning_tokens = (
         getattr(details, "reasoning_tokens", None) if details is not None else None
-    ) or getattr(usage, "thoughts_token_count", None) or 0
-    return int(prompt_tokens or 0), int(output_tokens or 0), int(thinking_tokens or 0)
+    ) or 0
+    gemini_thoughts = getattr(usage, "thoughts_token_count", None) or 0
+    thinking_tokens = int(gemini_thoughts or reasoning_tokens or 0)
+    billed_output = int(output_tokens or 0) + int(gemini_thoughts or 0)
+    return (
+        int(prompt_tokens or 0),
+        int(output_tokens or 0),
+        thinking_tokens,
+        billed_output,
+    )
 
 
 def _calculate_cost_analysis(response, model_name: str) -> Optional[dict]:
     usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
     if not usage:
         return None
+    prompt_tokens, output_tokens, thinking_tokens, billed_output = _usage_token_counts(usage)
     prices = lookup_model_prices(model_name)
-    price_estimated = prices is None
     if prices is None:
-        # Unknown model: conservative estimate so the UI shows something sane.
-        prices = (0.50, 3.00)
+        # Unknown OpenRouter/Gemini id: report tokens, do not invent a rate.
+        return {
+            "input_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "total_cost": 0.0,
+            "model": model_name,
+            "price_estimated": True,
+        }
     input_price_per_million, output_price_per_million = prices
-    prompt_tokens, output_tokens, thinking_tokens = _usage_token_counts(usage)
     input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
-    output_cost = ((output_tokens + thinking_tokens) / 1_000_000) * output_price_per_million
+    output_cost = (billed_output / 1_000_000) * output_price_per_million
     total_cost = input_cost + output_cost
     return {
         "input_tokens": prompt_tokens,
@@ -680,7 +704,7 @@ def _calculate_cost_analysis(response, model_name: str) -> Optional[dict]:
         "output_cost": output_cost,
         "total_cost": total_cost,
         "model": model_name,
-        "price_estimated": price_estimated,
+        "price_estimated": False,
     }
 
 
