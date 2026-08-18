@@ -11,14 +11,18 @@ services:
       - OPENROUTER_IMAGE_MODEL=${OPENROUTER_IMAGE_MODEL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-}
-      # Writable even when `.:/app` is a root-owned Dokploy checkout (appuser
-      # cannot mkdir on that tree). Named volumes init from the image dirs and
-      # the entrypoint chowns them before dropping privileges.
+      # Writable named volumes (PR #4). The image already has the code and
+      # baked yolov8n.pt — do not bind-mount the checkout over /app (Dokploy
+      # clones as root and that hid the weights + /app/.config).
       - UPLOAD_DIR=/app/uploads
       - OUTPUT_DIR=/app/output
+      - HOME=/tmp
+      - MPLCONFIGDIR=/tmp/matplotlib
+      - YOLO_CONFIG_DIR=/tmp/Ultralytics
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_CACHE_HOME=/tmp/.cache
+      - YOLO_WEIGHTS=/opt/models/yolov8n.pt
     volumes:
-      - .:/app
-      - /app/__pycache__
       - uploads_data:/app/uploads
       - output_data:/app/output
     restart: unless-stopped

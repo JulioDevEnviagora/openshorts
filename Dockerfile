@@ -92,22 +92,37 @@ RUN mkdir -p /usr/local/share/fonts/openshorts \
 # Create a non-root user (Moved up)
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
 
-# Create directories including Ultralytics cache config. /app/.cache/huggingface
-# exists in-image (appuser-owned via the chown below) so a persistent volume
-# mounted there inherits writable ownership for the ASR model downloads.
-RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface /tmp/Ultralytics
-# Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
-RUN chown -R appuser:appuser /app /tmp/Ultralytics
+# Caches and YOLO weights live outside /app. useradd sets HOME=/app, but a
+# Dokploy checkout bind-mounted over /app is root-owned — matplotlib then
+# cannot mkdir /app/.config and YOLO cannot write yolov8n.pt into cwd.
+# HOME/XDG_* send those writes to /tmp; FONTCONFIG_PATH is left unset so
+# the system font config in /etc/fonts still applies (XDG_CACHE_HOME is
+# what makes the fontconfig cache writable).
+ENV HOME=/tmp \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    YOLO_CONFIG_DIR=/tmp/Ultralytics \
+    XDG_CONFIG_HOME=/tmp/.config \
+    XDG_CACHE_HOME=/tmp/.cache \
+    YOLO_WEIGHTS=/opt/models/yolov8n.pt
 
-# Entrypoint lives outside /app so the compose bind-mount (.:/app) cannot hide it.
+# /app/.cache/huggingface exists in-image (appuser-owned via the chown
+# below) so a persistent volume mounted there inherits writable ownership
+# for the ASR model downloads.
+RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface \
+    /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache /opt/models
+RUN chown -R appuser:appuser /app /tmp/Ultralytics /tmp/matplotlib \
+    /tmp/.config /tmp/.cache /opt/models
+
+# Entrypoint lives outside /app so a local-dev checkout mount cannot hide it.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 # Switch to non-root user
 USER appuser
 
-# Pre-download YOLO model on build (now running as appuser)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+# Pre-download YOLO weights outside /app (not cwd). main.py loads YOLO_WEIGHTS.
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" \
+    && mv yolov8n.pt /opt/models/yolov8n.pt
 
 # Root only long enough for the entrypoint to chown volume mounts, then gosu.
 USER root

@@ -210,6 +210,14 @@ cp .env.example .env
 docker compose up --build
 ```
 
+Dokploy / production uses `docker-compose.yml` as-is: the image already has the backend code and baked YOLO weights, so the checkout is **not** bind-mounted over `/app` (a root-owned clone would hide them). Named volumes keep `uploads` and `output`.
+
+Local backend live-reload (bind-mounts the checkout):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
 Compose forwards `OPENROUTER_API_KEY` (and optional `OPENROUTER_IMAGE_MODEL`) into the backend. No Gemini key is required.
 
 ### 4. Open Dashboard
