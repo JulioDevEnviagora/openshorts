@@ -27,11 +27,22 @@ import recut
 
 load_dotenv()
 
+def _data_dir(env_key: str, default: str) -> str:
+    """Working directory honoring an optional env override.
+
+    Relative defaults (`uploads`, `output`) stay under cwd so a local
+    `uvicorn` keeps writing next to the checkout. Compose/Dokploy set
+    UPLOAD_DIR/OUTPUT_DIR at the named-volume mount points so a non-root
+    process can create them on a root-owned `.:/app` bind-mount.
+    """
+    path = os.environ.get(env_key) or default
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 # Constants
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "output"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+UPLOAD_DIR = _data_dir("UPLOAD_DIR", "uploads")
+OUTPUT_DIR = _data_dir("OUTPUT_DIR", "output")
 
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers

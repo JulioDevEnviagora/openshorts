@@ -50,6 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     fontconfig \
     fonts-liberation \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Deno JS runtime — required by yt-dlp for some extractor challenges.
@@ -98,11 +99,18 @@ RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface /tmp/Ultralytics
 # Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
 RUN chown -R appuser:appuser /app /tmp/Ultralytics
 
+# Entrypoint lives outside /app so the compose bind-mount (.:/app) cannot hide it.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+
 # Switch to non-root user
 USER appuser
 
 # Pre-download YOLO model on build (now running as appuser)
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
+# Root only long enough for the entrypoint to chown volume mounts, then gosu.
+USER root
 
 # Expose FastAPI port
 EXPOSE 8000
@@ -110,4 +118,5 @@ EXPOSE 8000
 # Run FastAPI app. --proxy-headers + --forwarded-allow-ips trust the reverse
 # proxy's X-Forwarded-Proto so generated URLs (e.g. the OAuth redirect_uri) use
 # https in production instead of the internal http scheme.
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
