@@ -44,9 +44,10 @@ services:
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
       # Managed provider keys (server-owned)
       - MANAGED_GEMINI_API_KEY=${MANAGED_GEMINI_API_KEY}
-      - AI_PROVIDER=${AI_PROVIDER:-}
+      - AI_PROVIDER=${AI_PROVIDER:-openrouter}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
+      - OPENROUTER_IMAGE_MODEL=${OPENROUTER_IMAGE_MODEL:-}
       - MANAGED_UPLOAD_POST_API_KEY=${MANAGED_UPLOAD_POST_API_KEY}
       - OPENSHORTS_LOGO_URL=${OPENSHORTS_LOGO_URL:-https://openshorts.app/logo.png}
       # Optional HTTP proxy for downloads. Leave empty to go direct.

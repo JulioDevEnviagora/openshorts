@@ -15,15 +15,11 @@ from clip_selection import (clip_count_targets, clip_duration_bounds,
 load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+DEFAULT_OPENROUTER_IMAGE_MODEL = "openai/gpt-image-1"
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 PROVIDERS = ("openrouter", "gemini")
-
-# Native Imagen / flash-image — OpenRouter cannot do this.
-GEMINI_IMAGE_ONLY = (
-    "Thumbnail image generation uses Gemini's native image model and is not "
-    "available via OpenRouter. Switch the provider to Gemini."
-)
 
 
 def looks_like_ai_studio_key(key: Optional[str]) -> bool:
@@ -148,14 +144,19 @@ def map_model_id(name: str) -> str:
 def resolve_request_provider(explicit: Optional[str] = None, *, billing: bool = False) -> str:
     """Provider for one request. An explicit header/setting wins.
 
-    Cloud/billing defaults to Gemini (managed key) unless the request
-    explicitly asks for OpenRouter. Self-host without an explicit choice
-    still infers from env keys (OpenRouter if only ``OPENROUTER_API_KEY``).
+    OpenRouter-first: a usable ``OPENROUTER_API_KEY`` (compose or cloud)
+    is enough. Billing does **not** force managed Gemini — that would make
+    ``GEMINI_API_KEY`` mandatory for compose. Cloud can still pick Gemini
+    via ``X-AI-Provider`` / ``AI_PROVIDER=gemini`` when a managed Google
+    key exists. Without an OpenRouter key, billing falls back to Gemini so
+    a cloud deploy that only has ``MANAGED_GEMINI_API_KEY`` keeps working.
     """
     chosen = (explicit or "").strip().lower()
     if chosen in PROVIDERS:
         return chosen
     if billing:
+        if openrouter_key():
+            return "openrouter"
         return "gemini"
     return resolve_provider()
 
@@ -175,6 +176,13 @@ def resolve_model(explicit: Optional[str] = None, provider: Optional[str] = None
     raw = (explicit or os.getenv("OPENROUTER_MODEL") or os.getenv("GEMINI_MODEL")
            or DEFAULT_OPENROUTER_MODEL)
     return map_model_id(str(raw).strip() or DEFAULT_OPENROUTER_MODEL)
+
+
+def resolve_image_model(explicit: Optional[str] = None) -> str:
+    """OpenRouter Image API model. Never a Gemini-native Imagen id."""
+    raw = (explicit or os.getenv("OPENROUTER_IMAGE_MODEL")
+           or DEFAULT_OPENROUTER_IMAGE_MODEL)
+    return str(raw).strip() or DEFAULT_OPENROUTER_IMAGE_MODEL
 
 
 def openrouter_client(api_key: Optional[str] = None) -> OpenAI:
@@ -233,6 +241,73 @@ def jpeg_image_url_parts(frames: List[bytes]) -> list:
     return parts
 
 
+def image_file_reference(path: str) -> dict:
+    """OpenRouter Image API ``input_references`` entry from a local image file."""
+    with open(path, "rb") as f:
+        data = f.read()
+    lower = path.lower()
+    mime = "image/png" if lower.endswith(".png") else "image/webp" if lower.endswith(".webp") else "image/jpeg"
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime};base64,{b64}"},
+    }
+
+
+def generate_openrouter_images(
+    api_key: Optional[str] = None,
+    prompt: str = "",
+    *,
+    model: Optional[str] = None,
+    n: int = 1,
+    aspect_ratio: str = "16:9",
+    quality: str = "high",
+    output_format: str = "jpeg",
+    references: Optional[list] = None,
+) -> dict:
+    """POST ``/api/v1/images`` on OpenRouter. Never uses google.genai.
+
+    Default model is ``openai/gpt-image-1`` (OpenRouter Image API; supports
+    ``input_references`` for face/background). Override with
+    ``OPENROUTER_IMAGE_MODEL``.
+    """
+    import httpx
+
+    key = assert_openrouter_safe_key(
+        api_key if api_key is not None else openrouter_key())
+    model_id = resolve_image_model(model)
+    payload = {
+        "model": model_id,
+        "prompt": prompt,
+        "n": max(1, int(n or 1)),
+        "aspect_ratio": aspect_ratio,
+        "quality": quality,
+        "output_format": output_format,
+    }
+    if references:
+        payload["input_references"] = references
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv(
+            "OPENROUTER_HTTP_REFERER",
+            "https://github.com/JulioDevEnviagora/openshorts",
+        ),
+        "X-Title": os.getenv("OPENROUTER_APP_TITLE", "OpenShorts"),
+    }
+    with httpx.Client(timeout=180.0) as client:
+        response = client.post(OPENROUTER_IMAGES_URL, headers=headers, json=payload)
+        if response.status_code >= 400:
+            detail = (response.text or "").strip()[:800]
+            raise RuntimeError(
+                f"OpenRouter image generation failed ({response.status_code}): {detail or 'empty body'}"
+            )
+        data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("OpenRouter image generation returned a non-object body.")
+    return data
+
+
 # --- Structured output schemas (passed as response_schema so the API
 # --- guarantees the format instead of us repairing free-form JSON). ---
 
@@ -282,9 +357,10 @@ class VisualResponse(BaseModel):
 
 VISUAL_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. This video has NO speech/audio — judge
-it purely by what you SEE. Watch the whole thing and pick the {min_clips}–{max_clips} MOST engaging
-visual moments for TikTok / Reels / Shorts (action, reveals, transformations,
-striking or funny shots, satisfying payoffs, dramatic movement).
+it purely by what you SEE in the sampled still frames (you are not watching the
+full video). Pick the {min_clips}–{max_clips} MOST engaging visual moments for
+TikTok / Reels / Shorts (action, reveals, transformations, striking or funny
+shots, satisfying payoffs, dramatic movement). Timestamps are approximate.
 
 TIME CONTRACT — STRICT:
 - Timestamps in ABSOLUTE SECONDS from the start (usable with ffmpeg -ss/-to).

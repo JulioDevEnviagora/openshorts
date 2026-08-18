@@ -1439,7 +1439,7 @@ function App() {
                   )}
                   {results?.cost_analysis && !isManaged && (
                     <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      GEMINI · ${results.cost_analysis.total_cost.toFixed(5)}
+                      AI · ${results.cost_analysis.total_cost.toFixed(5)}
                     </span>
                   )}
                   {results?.clips?.length > 0 && status === 'complete' && (

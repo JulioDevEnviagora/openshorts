@@ -133,7 +133,7 @@ class TestWebhookSigning:
         # The endpoint resolves a Gemini key before validating the webhook; a
         # dummy env key keeps the test on the SSRF branch both on dev machines
         # (where .env provides one anyway) and in CI (where nothing does).
-        monkeypatch.setenv("GEMINI_API_KEY", "test-dummy-key")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-dummy")
 
         async def _run():
             transport = httpx.ASGITransport(app=app)

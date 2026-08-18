@@ -29,11 +29,9 @@ export function loadAiSettings({ billingEnabled } = {}) {
   const explicit = storedProvider === 'openrouter' || storedProvider === 'gemini';
   let provider = storedProvider;
   if (!explicit) {
-    // Cloud uses managed Gemini unless the user explicitly picks OpenRouter.
-    // Self-host with only an OpenRouter key can still default to OpenRouter.
-    if (billingEnabled) provider = 'gemini';
-    else if (openrouterKey) provider = 'openrouter';
-    else if (geminiKey) provider = 'gemini';
+    // OpenRouter-first, including cloud. Gemini is the optional toggle.
+    if (openrouterKey) provider = 'openrouter';
+    else if (geminiKey && !billingEnabled) provider = 'gemini';
     else provider = 'openrouter';
   }
   return { provider, explicit, openrouterKey, geminiKey };
@@ -54,8 +52,8 @@ export function shouldSendAiProvider({ explicit, billingEnabled }) {
 export function aiHeaders(settings) {
   const key = selectedAiKey(settings);
   const headers = {};
-  // Cloud without an explicit choice: omit the header so the server keeps
-  // managed Gemini. Sending "openrouter" by default would drop MANAGED_GEMINI.
+  // Cloud without an explicit choice: omit the header so the server infers
+  // from compose keys (OpenRouter-first; Gemini only if no OR key).
   if (shouldSendAiProvider(settings) && settings.provider) {
     headers['X-AI-Provider'] = settings.provider;
   }

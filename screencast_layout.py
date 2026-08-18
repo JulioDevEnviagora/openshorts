@@ -25,8 +25,9 @@ What is different here is the question asked and what the answer is used for.
     counter. Here the worst case is showing the content full width above the
     speaker, which is a reasonable frame even when the trigger was wrong.
 
-Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY; without one it
-is a silent no-op, like every other optional Gemini path here.
+Off by default (``SCREENCAST_LAYOUT=1``). Needs an AI key (OpenRouter by
+default); without one it is a silent no-op. OpenRouter sees sampled stills —
+there is no File API on that path.
 """
 import json
 import os

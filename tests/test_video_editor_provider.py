@@ -1,4 +1,4 @@
-"""VideoEditor Gemini UI path must not inherit process-level OpenRouter."""
+"""VideoEditor follows OpenRouter-first compose defaults."""
 import pytest
 
 import gemini_worker
@@ -16,11 +16,19 @@ def _clean_ai_env(monkeypatch):
     monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
 
 
-def test_editor_defaults_to_gemini_when_compose_has_openrouter(monkeypatch):
+def test_editor_defaults_to_openrouter_when_compose_has_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
     monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
     monkeypatch.setattr(gemini_worker, "make_client", lambda *a, **k: object())
-    editor = editor_mod.VideoEditor("AIza-studio")
+    editor = editor_mod.VideoEditor("sk-or-1")
+    assert editor.provider == "openrouter"
+    assert editor.model_name == "google/gemini-2.5-flash"
+
+
+def test_editor_explicit_gemini_stays_optional(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
+    monkeypatch.setattr(gemini_worker, "make_client", lambda *a, **k: object())
+    editor = editor_mod.VideoEditor("AIza-studio", provider="gemini")
     assert editor.provider == "gemini"
     assert editor.model_name == "gemini-3.1-flash-lite"
     assert not editor.model_name.startswith("google/")

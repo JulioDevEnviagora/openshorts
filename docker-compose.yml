@@ -5,9 +5,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AI_PROVIDER=${AI_PROVIDER:-}
+      - AI_PROVIDER=${AI_PROVIDER:-openrouter}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
+      - OPENROUTER_IMAGE_MODEL=${OPENROUTER_IMAGE_MODEL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-}
     volumes:

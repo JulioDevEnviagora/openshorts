@@ -1351,9 +1351,9 @@ def _clean_visual_shorts(shorts, video_duration):
 def get_visual_clips(video_path, video_duration, language="en"):
     """Clip a SILENT video by vision.
 
-    Gemini uploads the file. OpenRouter does **not** watch the video: it
-    scores ~12 still frames. Timestamps from that path are approximate and
-    are clamped to ``[0, duration]``.
+    OpenRouter (default) scores ~12 still frames — it does not watch the
+    video. Timestamps from that path are approximate and are clamped to
+    ``[0, duration]``. Optional Gemini still uploads the file.
     """
     provider = gemini_worker.resolve_provider()
     if provider == "openrouter":

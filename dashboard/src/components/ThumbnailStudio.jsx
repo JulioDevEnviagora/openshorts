@@ -71,15 +71,18 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon }) {
 }
 
 export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter', aiProviderExplicit = false, billingEnabled = false, uploadPostKey, uploadUserId, managed = false }) {
-  // Managed (hosted plan): Gemini runs server-side via the bearer token, no BYOK key.
-  // Only send X-Gemini-Key for self-host BYOK. apiFetch attaches the bearer token.
+  // Self-host: compose OPENROUTER_API_KEY is enough (no browser key required).
+  // Send X-Gemini-Key only when the user pasted an OpenRouter key. Never send AIza
+  // to the thumbnail path — image gen is OpenRouter-only.
+  const looksLikeAiStudio = String(geminiApiKey || '').trim().startsWith('AIza');
+  const browserOrKey = geminiApiKey && !looksLikeAiStudio ? geminiApiKey : '';
   const keyHeader = {
-    ...(geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {}),
+    ...(browserOrKey ? { 'X-Gemini-Key': browserOrKey } : {}),
   };
   if (aiProviderExplicit || billingEnabled === false) {
-    keyHeader['X-AI-Provider'] = aiProvider;
+    keyHeader['X-AI-Provider'] = 'openrouter';
   }
-  const needsKey = !geminiApiKey && !managed;
+  const needsKey = !managed && aiProvider === 'gemini' && !geminiApiKey;
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -152,7 +155,7 @@ export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter
 
   // --- Step 1: Analyze Video ---
   const handleAnalyze = async () => {
-    if (needsKey) return alert('Please set your Gemini API key in Settings first.');
+    if (needsKey) return alert('Please set your OpenRouter API key in Settings first.');
     setIsAnalyzing(true);
 
     try {
@@ -262,7 +265,7 @@ export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter
 
   // --- Step 3: Generate Thumbnails ---
   const handleGenerate = async () => {
-    if (needsKey) return alert('Please set your Gemini API key in Settings first.');
+    if (needsKey) return alert('Please set your OpenRouter API key in Settings first.');
     const finalTitle = selectedTitle || manualTitle;
     if (!finalTitle) return alert('Please select or enter a title first.');
 
@@ -291,7 +294,7 @@ export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter
 
       const data = await res.json();
       if (!data.thumbnails || data.thumbnails.length === 0) {
-        throw new Error('No thumbnails were generated. Your Gemini API key may not have access to image generation.');
+        throw new Error('No thumbnails were generated. Check OPENROUTER_API_KEY and the OpenRouter image model.');
       }
       setGeneratedThumbnails(data.thumbnails);
     } catch (e) {
@@ -321,7 +324,7 @@ export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter
 
   // --- Description Generation ---
   const handleGenerateDescription = async () => {
-    if (needsKey) return alert('Please set your Gemini API key in Settings first.');
+    if (needsKey) return alert('Please set your OpenRouter API key in Settings first.');
     const finalTitle = selectedTitle || manualTitle;
     if (!finalTitle) return alert('Please select a title first.');
     if (!sessionId) return alert('No session available.');
@@ -464,13 +467,14 @@ export default function ThumbnailStudio({ geminiApiKey, aiProvider = 'openrouter
           <StepIndicator steps={STEPS} current={step} />
         </div>
 
-        {/* Gemini API Key Warning (self-host BYOK only; managed uses server key) */}
+        {/* Key warning only if the optional Gemini toggle is on without a key.
+            Compose OPENROUTER_API_KEY is enough for the default OpenRouter path. */}
         {needsKey && (
           <div className="mb-6 p-5 bg-warn/10 rounded-card flex items-start gap-3">
             <AlertCircle size={18} className="text-warn shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-warn lowercase">Gemini API Key Required</p>
-              <p className="text-xs text-muted mt-1">YouTube Studio requires a Google Gemini API key to function. Please configure it in the <strong>Settings</strong> tab before using this feature. Gemini's free tier includes 1,500 requests per day.</p>
+              <p className="text-sm font-medium text-warn lowercase">OpenRouter API Key Required</p>
+              <p className="text-xs text-muted mt-1">YouTube Studio uses OpenRouter (including image generation). Set <strong>OPENROUTER_API_KEY</strong> in compose or paste an OpenRouter key in Settings. Gemini is optional and is not used here.</p>
             </div>
           </div>
         )}
