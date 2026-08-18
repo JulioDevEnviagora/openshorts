@@ -17,8 +17,15 @@ MODEL_PRICES = {
 
 
 def lookup_model_prices(model_name):
-    """Longest-prefix match against MODEL_PRICES; None if unknown."""
+    """Longest-prefix match against MODEL_PRICES; None if unknown.
+
+    OpenRouter ids are ``provider/model`` (e.g. ``google/gemini-2.5-flash``);
+    the provider prefix is stripped so the existing Gemini price table still
+    matches.
+    """
     name = str(model_name or "").lower()
+    if "/" in name:
+        name = name.split("/", 1)[1]
     best_key = None
     for key in MODEL_PRICES:
         if name.startswith(key) and (best_key is None or len(key) > len(best_key)):

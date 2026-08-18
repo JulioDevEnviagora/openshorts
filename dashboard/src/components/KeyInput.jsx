@@ -23,7 +23,7 @@ export default function KeyInput({ onKeySet, savedKey }) {
                 <div className="p-2 bg-paper3 rounded-input text-brass">
                     <Key size={18} />
                 </div>
-                <h2 className="font-display lowercase text-lg text-ink">Gemini API Key</h2>
+                <h2 className="font-display lowercase text-lg text-ink">OpenRouter API Key</h2>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
@@ -35,7 +35,7 @@ export default function KeyInput({ onKeySet, savedKey }) {
                             setKey(e.target.value);
                             setIsSaved(false);
                         }}
-                        placeholder="AIzaSy..."
+                        placeholder="sk-or-v1-..."
                         className="input-field pr-12 font-mono"
                     />
                     <button
@@ -54,15 +54,16 @@ export default function KeyInput({ onKeySet, savedKey }) {
                 </button>
             </div>
             <p className="mt-3 text-xs text-muted">
-                Your key is stored locally in your browser for convenience.
+                OpenRouter key for clip scoring and layout. GEMINI_API_KEY still works as a server fallback.
+                Stored locally in your browser.
                 <br />
                 <a
-                    href="https://aistudio.google.com/app/apikey"
+                    href="https://openrouter.ai/keys"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-brass hover:underline mt-1 inline-block"
                 >
-                    Get your free Gemini API Key here →
+                    Get an OpenRouter API key →
                 </a>
             </p>
         </div>

@@ -18,9 +18,6 @@ from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
-from google import genai
-from google.genai import types as genai_types
-
 import gemini_worker
 import layout_picker
 from clip_selection import (build_transcript_windows, clip_count_targets,
@@ -1178,30 +1175,13 @@ def transcribe_video(video_path):
     return transcript
 
 def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
+    """One schema-enforced OpenRouter call with transient-error backoff.
     Returns (parsed_dict, cost_analysis)."""
-    config = genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
+            parsed, response = gemini_worker.complete_json(
+                client, model_name, prompt, schema)
             return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
         except gemini_worker.GeminiBlockedError:
             raise  # deterministic policy block — never retry
@@ -1215,7 +1195,7 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            print(f"⚠️ OpenRouter transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
 
 
@@ -1227,14 +1207,14 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
     """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
+    print("\U0001f916  Analyzing with OpenRouter (2-pass: score → detail)...")
+    api_key = gemini_worker.resolve_api_key()
     if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+        print("❌ Error: OPENROUTER_API_KEY (or GEMINI_API_KEY fallback) not found.")
         return None
 
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    client = gemini_worker.openrouter_client(api_key)
+    model_name = gemini_worker.resolve_model()
     language = str(transcript_result.get('language') or 'unknown')
     print(f"\U0001f916  Model: {model_name} | language: {language}")
 
@@ -1318,93 +1298,20 @@ def get_viral_clips(transcript_result, video_duration):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        print(f"❌ OpenRouter Error: {e}")
         return None
 
 
 def get_visual_clips(video_path, video_duration, language="en"):
-    """Clip a SILENT video by vision: Gemini watches the footage and picks the
-    most engaging visual moments (no transcript). Returns the same
-    {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
-    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found.")
-        return None
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    print(f"🎥  Model: {model_name} | uploading {os.path.basename(video_path)}…")
+    """Silent-video vision still needs the Google Gemini File API.
 
-    file_upload = None
-    try:
-        file_upload = client.files.upload(file=video_path)
-        deadline = time.time() + 180
-        while True:
-            info = client.files.get(name=file_upload.name)
-            state = str(getattr(getattr(info, "state", info), "name", "")).upper()
-            if state == "ACTIVE":
-                break
-            if state == "FAILED":
-                print("❌ Gemini could not process the video.")
-                return None
-            if time.time() > deadline:
-                print("❌ Gemini video processing timed out.")
-                return None
-            time.sleep(2)
-
-        # The vision path has no scoring windows to derive a count from, so the
-        # env targets (user request) apply directly over the classic 3-15.
-        def _env_int(name, default):
-            try:
-                return max(1, int(os.environ.get(name, "")))
-            except ValueError:
-                return default
-        v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
-        v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
-        v_min_secs, v_max_secs = clip_duration_bounds()
-        prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            min_clips=v_min_clips, max_clips=v_max_clips,
-            min_secs=v_min_secs, max_secs=v_max_secs)
-        config = genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=gemini_worker.VisualResponse,
-        )
-        response = client.models.generate_content(
-            model=model_name, contents=[file_upload, prompt], config=config)
-        gemini_worker.raise_if_blocked(response)
-        parsed = json.loads(response.text)
-        shorts = parsed.get("shorts") or []
-        # Clamp to the real duration; drop anything degenerate.
-        clean = []
-        for s in shorts:
-            s["start"] = max(0.0, float(s.get("start", 0)))
-            s["end"] = min(float(video_duration), float(s.get("end", 0)))
-            if s["end"] - s["start"] >= 1.0:
-                clean.append(s)
-        if not clean:
-            print("⚠️ Vision pass returned no usable clips.")
-            return None
-
-        cost = gemini_worker._calculate_cost_analysis(response, model_name)
-        if cost:
-            print(f"💰 Vision cost ({model_name}): ${cost.get('total_cost', 0):.6f}")
-        result = {"shorts": clean}
-        if cost:
-            result["cost_analysis"] = cost
-        return result
-    except gemini_worker.GeminiBlockedError as e:
-        print(f"🚫 {e}")
-        raise
-    except Exception as e:
-        print(f"❌ Gemini vision error: {e}")
-        return None
-    finally:
-        if file_upload is not None:
-            try:
-                client.files.delete(name=file_upload.name)
-            except Exception:
-                pass
+    OpenRouter has no video-upload stack on this path — skip with a clear
+    error instead of pretending to analyze. Podcasts with speech use
+    get_viral_clips.
+    """
+    print(f"❌ {gemini_worker.FILE_API_UNAVAILABLE}")
+    print("   Silent videos cannot be analyzed until a video-upload path exists.")
+    return None
 
 
 if __name__ == '__main__':

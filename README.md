@@ -183,7 +183,7 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 ## Requirements
 
 - **Docker & Docker Compose**
-- **Google Gemini API Key** ([Free — get it here](https://aistudio.google.com/app/apikey)) — required for all AI features
+- **OpenRouter API Key** ([openrouter.ai/keys](https://openrouter.ai/keys)) — required for clip scoring / layout (podcast path). `GEMINI_API_KEY` is still accepted as a fallback.
 - **fal.ai API Key** ([Pay-per-use](https://fal.ai)) — required for AI Shorts (actor generation, video, lip-sync)
 - **ElevenLabs API Key** ([Free tier](https://elevenlabs.io)) — required for voiceover/dubbing
 - **Upload-Post API Key** ([free tier](https://upload-post.com)) — required for direct social posting
@@ -354,7 +354,9 @@ lives in [`examples/n8n/`](examples/n8n/).
 **Client-side (encrypted in localStorage):**
 | Key | Description |
 |-----|------------|
-| `GEMINI_API_KEY` | Google Gemini — required |
+| `OPENROUTER_API_KEY` | OpenRouter — required for the podcast clip path |
+| `OPENROUTER_MODEL` | Optional. Default `google/gemini-2.5-flash`. Bare `gemini-*` ids map to `google/<name>` |
+| `GEMINI_API_KEY` | Fallback if `OPENROUTER_API_KEY` is unset |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
 | `UPLOAD_POST_API_KEY` | Upload-Post — required, for social posting |

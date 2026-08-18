@@ -864,9 +864,9 @@ function App() {
                 <AlertTriangle size={12} />
                 <span className="hidden sm:inline">
                   {!apiKey && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
+                    ? 'OpenRouter & Upload-Post keys missing'
                     : !apiKey
-                      ? 'Gemini API Key Missing'
+                      ? 'OpenRouter API Key Missing'
                       : 'Upload-Post API Key Missing'}
                 </span>
                 <span className="sm:hidden">keys missing</span>
@@ -884,9 +884,9 @@ function App() {
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
                   {!apiKey && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
+                    ? 'Set your OpenRouter and Upload-Post API keys to use OpenShorts.'
                     : !apiKey
-                      ? 'Set your Gemini API key to use OpenShorts.'
+                      ? 'Set your OpenRouter API key to use OpenShorts.'
                       : 'Set your Upload-Post API key to use OpenShorts.'}
                 </span>
               </div>
@@ -1507,7 +1507,7 @@ function App() {
         title={!apiKey && !uploadPostKey
           ? 'Required API Keys Missing'
           : !apiKey
-            ? 'Gemini API Key Required'
+            ? 'OpenRouter API Key Required'
             : 'Upload-Post API Key Required'}
         footer={
           <div className="flex gap-3">
@@ -1528,26 +1528,25 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            OpenShorts needs both an <strong className="text-ink2">OpenRouter</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
           </p>
 
           {/* Gemini block */}
           <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
               {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
+              OpenRouter API Key {apiKey && <span className="text-ok">— set</span>}
             </p>
             {!apiKey && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">aistudio.google.com/app/apikey</a></li>
-                  <li>Sign in with your Google account</li>
-                  <li>Click "Create API Key"</li>
+                  <li>Go to <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">openrouter.ai/keys</a></li>
+                  <li>Create an API key</li>
                   <li>Copy the key and paste it below</li>
                 </ol>
                 <input
                   type="text"
-                  placeholder="Paste your Gemini API key here..."
+                  placeholder="Paste your OpenRouter API key here..."
                   className="input-field"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && e.target.value.trim()) {

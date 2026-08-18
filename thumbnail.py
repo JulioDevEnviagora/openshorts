@@ -17,6 +17,10 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
     If transcript is provided, skips Whisper transcription.
     Returns: { "titles": [...], "transcript_summary": "...", "language": "...", "segments": [...], "video_duration": ... }
     """
+    # Video File API is not available via OpenRouter. Fail before any upload.
+    import gemini_worker
+    raise RuntimeError(gemini_worker.FILE_API_UNAVAILABLE)
+
     if transcript is None:
         from main import transcribe_video
         print("🎬 [Thumbnail] Transcribing video...")

@@ -70,21 +70,51 @@ class TestApply:
 class TestPick:
     def test_disabled_picker_never_calls_out(self, monkeypatch):
         monkeypatch.setattr(layout_picker, "ENABLED", False)
-        monkeypatch.setenv("GEMINI_API_KEY", "x")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
         assert pick("video.mp4", 60) == "none"
 
     def test_missing_api_key_degrades_to_none(self, monkeypatch):
         monkeypatch.setattr(layout_picker, "ENABLED", True)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         assert pick("video.mp4", 60) == "none"
 
     def test_a_failed_call_degrades_to_none(self, monkeypatch):
-        # Import failure inside pick() stands in for any API error; the job
-        # must keep rendering with today's routing rather than die.
+        # A broken OpenRouter call must keep rendering with today's routing.
         monkeypatch.setattr(layout_picker, "ENABLED", True)
-        monkeypatch.setenv("GEMINI_API_KEY", "x")
-        monkeypatch.setitem(sys.modules, "google.genai", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+        monkeypatch.setattr("gemini_worker.openrouter_client",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert pick("video.mp4", 60) == "none"
+
+    def test_gemini_key_fallback_is_enough(self, monkeypatch):
+        monkeypatch.setattr(layout_picker, "ENABLED", True)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "x")
+        monkeypatch.setattr(layout_picker, "sample_frames", lambda *a, **k: [])
+        assert pick("video.mp4", 60) == "none"
+
+    def test_sends_jpeg_data_uris_and_uses_decision(self, monkeypatch):
+        captured = {}
+
+        def _complete(client, model, prompt, schema, strategy="structured-schema",
+                      mode="score", messages=None):
+            captured["messages"] = messages
+            captured["schema"] = schema
+            captured["model"] = model
+            return {"layout": "screencast", "confidence": 0.9, "why": "spreadsheet"}, None
+
+        monkeypatch.setattr(layout_picker, "ENABLED", True)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+        monkeypatch.setattr(layout_picker, "sample_frames", lambda *a, **k: [b"\xff\xd8jpeg"])
+        monkeypatch.setattr("gemini_worker.openrouter_client", lambda *a, **k: object())
+        monkeypatch.setattr("gemini_worker.complete_json", _complete)
+        assert pick("video.mp4", 60) == "screencast"
+        parts = captured["messages"][0]["content"]
+        assert parts[0]["type"] == "image_url"
+        assert parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        assert parts[-1]["type"] == "text"
+        assert captured["schema"] is not None
 
 
 class TestValidDecisions:
@@ -107,7 +137,7 @@ class TestSampleFrames:
 
     def test_no_frames_degrades_to_none(self, monkeypatch):
         monkeypatch.setattr(layout_picker, "ENABLED", True)
-        monkeypatch.setenv("GEMINI_API_KEY", "x")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
         monkeypatch.setattr(layout_picker, "sample_frames", lambda *a, **k: [])
         assert pick("video.mp4", 60) == "none"
 

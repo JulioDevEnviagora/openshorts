@@ -34,35 +34,14 @@ class VideoEditor:
         )
 
     def upload_video(self, video_path):
-        """Uploads video to Gemini File API."""
-        print(f"📤 Uploading {video_path} to Gemini...")
-        
-        # Ensure we are passing a path that exists
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-            
-        # Using 'file' keyword instead of 'path'
-        try:
-            file_upload = self.client.files.upload(file=video_path)
-        except Exception as e:
-            print(f"❌ Gemini Upload Error: {e}")
-            raise e
-        
-        # Wait for processing
-        print("⏳ Waiting for video processing by Gemini...")
-        deadline = time.time() + 120
-        while True:
-            file_info = self.client.files.get(name=file_upload.name)
-            state = getattr(file_info, "state", file_info)
-            state_name = str(getattr(state, "name", state)).upper()
-            if state_name == "ACTIVE":
-                print("✅ Video processed and ready.")
-                return file_upload
-            if state_name == "FAILED":
-                raise Exception("Video processing failed by Gemini.")
-            if time.time() > deadline:
-                raise TimeoutError("Gemini file processing timed out after 120s.")
-            time.sleep(2)
+        """Uploads video to Gemini File API.
+
+        OpenRouter has no video-upload stack. Fail clearly so an OpenRouter
+        key is never sent at Google AI Studio. The File API implementation
+        is unchanged and still lives in git history / upstream.
+        """
+        import gemini_worker
+        raise RuntimeError(gemini_worker.FILE_API_UNAVAILABLE)
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None, has_captions=False):
         """Asks Gemini for an edit decision list, then builds the FFmpeg filter

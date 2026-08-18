@@ -105,7 +105,7 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     header = request.headers.get("X-Gemini-Key")
     if header:
         return header
-    return os.environ.get("GEMINI_API_KEY")
+    return os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -592,6 +592,7 @@ def _resume_interrupted_jobs() -> set:
         if BILLING_ENABLED and user_id is not None:
             try:
                 env["GEMINI_API_KEY"] = managed_keys.gemini_key()
+                env["OPENROUTER_API_KEY"] = env["GEMINI_API_KEY"]
             except Exception:
                 pass
         if m.get("watermark"):
@@ -1544,6 +1545,7 @@ async def process_endpoint(
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
     env["GEMINI_API_KEY"] = api_key # Override with key from request
+    env["OPENROUTER_API_KEY"] = api_key  # same value; worker prefers this name
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK

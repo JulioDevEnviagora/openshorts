@@ -90,6 +90,7 @@ class TestPricing:
     def test_known_models(self):
         assert lookup_model_prices("gemini-2.5-flash") == (0.30, 2.50)
         assert lookup_model_prices("gemini-3-flash-preview") == (0.50, 3.00)
+        assert lookup_model_prices("google/gemini-2.5-flash") == (0.30, 2.50)
 
     def test_prefix_match_with_suffix(self):
         assert lookup_model_prices("gemini-2.5-flash-002") == (0.30, 2.50)

@@ -1,18 +1,79 @@
 import argparse
+import base64
 import json
 import os
 import sys
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types as genai_types
+from openai import OpenAI
 from pydantic import BaseModel
 
 from clip_selection import (clip_count_targets, clip_duration_bounds,
                             lookup_model_prices)
 
 load_dotenv()
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+
+# File API callers (silent-video vision, editor, thumbnails) still need
+# google.genai. OpenRouter has no equivalent video-upload stack.
+FILE_API_UNAVAILABLE = (
+    "This feature still uses the Google Gemini File API (video upload) and is "
+    "not available via OpenRouter. Use a video with speech for the podcast "
+    "path, or keep a Google AI Studio key for this feature."
+)
+
+
+def resolve_api_key() -> Optional[str]:
+    """OPENROUTER_API_KEY, then GEMINI_API_KEY so existing BYOK still works."""
+    return (os.getenv("OPENROUTER_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip() or None
+
+
+def map_model_id(name: str) -> str:
+    """Map a bare ``gemini-*`` id to OpenRouter's ``google/<name>`` form."""
+    model = (name or "").strip()
+    if model.startswith("gemini-") and "/" not in model:
+        return f"google/{model}"
+    return model
+
+
+def resolve_model(explicit: Optional[str] = None) -> str:
+    """OPENROUTER_MODEL, then GEMINI_MODEL, then google/gemini-2.5-flash."""
+    raw = (explicit or os.getenv("OPENROUTER_MODEL") or os.getenv("GEMINI_MODEL")
+           or DEFAULT_OPENROUTER_MODEL)
+    return map_model_id(str(raw).strip() or DEFAULT_OPENROUTER_MODEL)
+
+
+def openrouter_client(api_key: Optional[str] = None) -> OpenAI:
+    key = api_key if api_key is not None else resolve_api_key()
+    if not key:
+        raise RuntimeError(
+            "Missing OPENROUTER_API_KEY (or GEMINI_API_KEY fallback).")
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=key,
+        default_headers={
+            "HTTP-Referer": os.getenv(
+                "OPENROUTER_HTTP_REFERER",
+                "https://github.com/JulioDevEnviagora/openshorts",
+            ),
+            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "OpenShorts"),
+        },
+    )
+
+
+def jpeg_image_url_parts(frames: List[bytes]) -> list:
+    """OpenAI-style image_url parts from JPEG bytes (data URIs)."""
+    parts = []
+    for data in frames:
+        b64 = base64.b64encode(data).decode("ascii")
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    return parts
 
 
 # --- Structured output schemas (passed as response_schema so the API
@@ -374,7 +435,26 @@ _BLOCKED_FINISH_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST",
 
 
 def raise_if_blocked(response):
-    """Raise GeminiBlockedError when the API refused to answer on policy grounds."""
+    """Raise GeminiBlockedError when the API refused to answer on policy grounds.
+
+    Accepts OpenRouter/OpenAI chat completions and leftover google.genai
+    responses (File API callers that still go through this helper).
+    """
+    # OpenAI / OpenRouter
+    for c in getattr(response, "choices", None) or []:
+        fr = getattr(c, "finish_reason", None)
+        name = (getattr(fr, "name", None) or str(fr or "")).upper()
+        if name in _BLOCKED_FINISH_REASONS or name == "CONTENT_FILTER":
+            raise GeminiBlockedError(
+                f"OpenRouter blocked its answer for this video ({name}). The AI "
+                "provider's usage policies reject this material, so it can't be analyzed.")
+        msg = getattr(c, "message", None)
+        refusal = getattr(msg, "refusal", None) if msg is not None else None
+        if refusal:
+            raise GeminiBlockedError(
+                f"OpenRouter blocked its answer for this video (refusal). The AI "
+                "provider's usage policies reject this material, so it can't be analyzed.")
+
     pf = getattr(response, "prompt_feedback", None)
     reason = getattr(pf, "block_reason", None)
     if reason:
@@ -392,6 +472,17 @@ def raise_if_blocked(response):
 
 
 def _get_response_text(response) -> str:
+    choices = getattr(response, "choices", None)
+    if choices:
+        parts = []
+        for choice in choices:
+            msg = getattr(choice, "message", None)
+            content = getattr(msg, "content", None) if msg is not None else None
+            if content:
+                parts.append(content)
+        if parts:
+            return "\n".join(parts).strip()
+
     try:
         text = response.text
         if text:
@@ -409,8 +500,29 @@ def _get_response_text(response) -> str:
     return "\n".join(parts).strip()
 
 
+def _usage_token_counts(usage) -> tuple:
+    """Map OpenAI/OpenRouter usage (or leftover Gemini usage_metadata) to tokens."""
+    if usage is None:
+        return 0, 0, 0
+    prompt_tokens = (
+        getattr(usage, "prompt_tokens", None)
+        or getattr(usage, "prompt_token_count", None)
+        or 0
+    )
+    output_tokens = (
+        getattr(usage, "completion_tokens", None)
+        or getattr(usage, "candidates_token_count", None)
+        or 0
+    )
+    details = getattr(usage, "completion_tokens_details", None)
+    thinking_tokens = (
+        getattr(details, "reasoning_tokens", None) if details is not None else None
+    ) or getattr(usage, "thoughts_token_count", None) or 0
+    return int(prompt_tokens or 0), int(output_tokens or 0), int(thinking_tokens or 0)
+
+
 def _calculate_cost_analysis(response, model_name: str) -> Optional[dict]:
-    usage = getattr(response, "usage_metadata", None)
+    usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
     if not usage:
         return None
     prices = lookup_model_prices(model_name)
@@ -419,10 +531,7 @@ def _calculate_cost_analysis(response, model_name: str) -> Optional[dict]:
         # Unknown model: conservative estimate so the UI shows something sane.
         prices = (0.50, 3.00)
     input_price_per_million, output_price_per_million = prices
-    prompt_tokens = usage.prompt_token_count or 0
-    output_tokens = usage.candidates_token_count or 0
-    # Thinking tokens bill at the output rate even though they are invisible.
-    thinking_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+    prompt_tokens, output_tokens, thinking_tokens = _usage_token_counts(usage)
     input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
     output_cost = ((output_tokens + thinking_tokens) / 1_000_000) * output_price_per_million
     total_cost = input_cost + output_cost
@@ -438,74 +547,101 @@ def _calculate_cost_analysis(response, model_name: str) -> Optional[dict]:
     }
 
 
-def _thinking_config_from_env(model_name: str):
-    """GEMINI_THINKING_SCORE: off (default) | low | high | <token budget>.
-
-    Applied only to the scoring stage. Gemini 3 models take thinking_level,
-    Gemini 2.5 takes thinking_budget; returns None (= model default) if the
-    setting is off or the SDK rejects the config."""
-    raw = (os.getenv("GEMINI_THINKING_SCORE") or "off").strip().lower()
-    if raw in ("", "off", "0", "none", "false"):
-        return None
-    try:
-        if raw.isdigit():
-            return genai_types.ThinkingConfig(thinking_budget=int(raw))
-        if raw in ("low", "high"):
-            if model_name.startswith("gemini-3"):
-                return genai_types.ThinkingConfig(thinking_level=raw)
-            return genai_types.ThinkingConfig(thinking_budget=2048 if raw == "low" else 8192)
-    except Exception as e:
-        _log(f"⚠️ Ignoring GEMINI_THINKING_SCORE={raw!r}: {e}")
-    return None
-
-
-def _config_for_strategy(strategy: str, mode: str, model_name: str) -> genai_types.GenerateContentConfig:
-    # The detail stage writes creative copy (hooks/descriptions) — it gets a
-    # high temperature; timestamps are validated and word-snapped afterwards.
-    # The score stage stays precise. Fallback strategies get conservative.
-    creative = mode == "detail"
-    kwargs = {
-        "response_mime_type": "application/json",
-        "candidate_count": 1,
-    }
+def _response_format_for(schema: Optional[type], strategy: str) -> Optional[dict]:
+    """OpenAI-style response_format. Structured schema is the primary path."""
+    if strategy == "json-text-recovery":
+        return {"type": "json_object"}
     if strategy == "strict-json":
-        kwargs["temperature"] = 0.7 if creative else 0.1
-    elif strategy == "json-text-recovery":
-        kwargs["temperature"] = 0.2 if creative else 0.0
-    else:  # structured-schema: schema-enforced output, primary strategy
-        kwargs["temperature"] = 0.9 if creative else 0.2
-        kwargs["response_schema"] = DetailResponse if mode == "detail" else ScoreResponse
-        if mode == "score":
-            thinking = _thinking_config_from_env(model_name)
-            if thinking is not None:
-                kwargs["thinking_config"] = thinking
-    return genai_types.GenerateContentConfig(**kwargs)
+        return {"type": "json_object"}
+    if schema is None or not hasattr(schema, "model_json_schema"):
+        return {"type": "json_object"}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": getattr(schema, "__name__", "response") or "response",
+            "schema": schema.model_json_schema(),
+        },
+    }
+
+
+def _temperature_for_strategy(strategy: str, mode: str) -> float:
+    creative = mode == "detail"
+    if strategy == "strict-json":
+        return 0.7 if creative else 0.1
+    if strategy == "json-text-recovery":
+        return 0.2 if creative else 0.0
+    return 0.9 if creative else 0.2
+
+
+def _parse_structured_payload(raw_text: str, schema: Optional[type] = None) -> dict:
+    """Prefer schema validation; fall back to the existing text-repair path."""
+    if schema is not None and raw_text:
+        try:
+            return schema.model_validate_json(raw_text).model_dump()
+        except Exception:
+            pass
+    data = _parse_json_response_text(raw_text)
+    if schema is not None:
+        try:
+            return schema.model_validate(data).model_dump()
+        except Exception:
+            pass
+    return data
+
+
+def complete_json(client, model_name, prompt, schema, strategy="structured-schema",
+                  mode="score", messages=None):
+    """One OpenRouter chat completion that must return JSON matching schema.
+
+    ``messages`` overrides the default single user prompt (used for image parts).
+    Returns ``(parsed_dict, response)``.
+    """
+    if messages is None:
+        messages = [{"role": "user", "content": prompt}]
+    kwargs = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": _temperature_for_strategy(strategy, mode),
+    }
+    response_format = _response_format_for(schema, strategy)
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    response = client.chat.completions.create(**kwargs)
+    raise_if_blocked(response)
+    raw_text = _get_response_text(response)
+    parsed_obj = getattr(response, "parsed", None)
+    if parsed_obj is not None:
+        parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+        if isinstance(parsed, dict):
+            return parsed, response
+    parsed = _parse_structured_payload(raw_text, schema)
+    return parsed, response
 
 
 def main() -> int:
     _configure_stdio()
 
-    parser = argparse.ArgumentParser(description="Run a single Gemini request for clip scoring/detailing.")
+    parser = argparse.ArgumentParser(description="Run a single OpenRouter request for clip scoring/detailing.")
     parser.add_argument("--mode", choices=["score", "detail"], required=True)
     parser.add_argument("--input", dest="input_path", required=True)
     parser.add_argument("--output", dest="output_path", required=True)
     parser.add_argument("--strategy", default="structured-schema")
-    parser.add_argument("--model", default="gemini-2.5-flash")
+    parser.add_argument("--model", default=None)
     args = parser.parse_args()
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = resolve_api_key()
     if not api_key:
-        raise SystemExit("Missing GEMINI_API_KEY.")
+        raise SystemExit("Missing OPENROUTER_API_KEY (or GEMINI_API_KEY fallback).")
 
     with open(args.input_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    model_name = args.model
-    client = genai.Client(api_key=api_key)
-    config = _config_for_strategy(args.strategy, args.mode, model_name)
+    model_name = resolve_model(args.model)
+    client = openrouter_client(api_key)
     language = str(payload.get("language") or "unknown")
 
     template = SCORE_PROMPT_TEMPLATE if args.mode == "score" else DETAIL_PROMPT_TEMPLATE
+    schema = ScoreResponse if args.mode == "score" else DetailResponse
     fmt = {
         "video_duration": payload["video_duration"],
         "language": language,
@@ -519,21 +655,10 @@ def main() -> int:
         fmt["min_secs"], fmt["max_secs"] = clip_duration_bounds()
     prompt = template.format(**fmt)
 
-    _log(f"🤖 Gemini worker request: mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=config,
-    )
-
+    _log(f"🤖 OpenRouter worker request: mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
+    parsed, response = complete_json(
+        client, model_name, prompt, schema, strategy=args.strategy, mode=args.mode)
     raw_text = _get_response_text(response)
-    # With response_schema the SDK returns an already-validated object; fall
-    # back to the text-repair path only when that is unavailable.
-    parsed_obj = getattr(response, "parsed", None)
-    if parsed_obj is not None:
-        parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-    else:
-        parsed = _parse_json_response_text(raw_text)
     result = {
         "mode": args.mode,
         "payload": parsed,
@@ -542,7 +667,7 @@ def main() -> int:
     }
     with open(args.output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
-    _log(f"✅ Gemini worker success: mode={args.mode}")
+    _log(f"✅ OpenRouter worker success: mode={args.mode}")
     return 0
 
 
