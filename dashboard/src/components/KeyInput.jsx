@@ -106,8 +106,8 @@ export default function KeyInput({
             )}
             <p className="mt-3 text-xs text-muted">
                 {isGemini
-                    ? 'Google AI Studio key for native Gemini (File API, image generation). Never sent to openrouter.ai.'
-                    : 'OpenRouter key for clip scoring, layout and vision. Never sent to Google. Stored locally in your browser.'}
+                    ? 'Optional Google AI Studio key for the native Gemini toggle. Never sent to openrouter.ai. Not required — OpenRouter is the default.'
+                    : 'OpenRouter key for clips, layout, editor, silent/visual stills and thumbnails. Never sent to Google. Stored locally in your browser.'}
                 <br />
                 <a
                     href={isGemini ? "https://aistudio.google.com/apikey" : "https://openrouter.ai/keys"}

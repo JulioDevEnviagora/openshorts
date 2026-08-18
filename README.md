@@ -15,7 +15,7 @@
 |---|---|---|
 | **Price** | Free forever, MIT | Free plan, paid from $12/mo |
 | **Speed** | 5 to 8 min per 8-min video on CPU | About 50s on our NVIDIA GPU |
-| **API keys** | Bring your own Gemini, ElevenLabs, fal.ai | Gemini included, nothing to set up |
+| **API keys** | Bring your own OpenRouter, ElevenLabs, fal.ai | AI included, nothing to set up |
 | **Watermark / limits** | None, ever | Watermark and 20 min/mo on the free plan, neither on paid |
 | **Setup** | Docker, 8GB+ RAM, model downloads | Sign in and paste a link |
 | **MCP / API for agents** | Same `/mcp` endpoint, but only while your machine is on | Always-on endpoint at [mcp.openshorts.app](https://www.openshorts.app/mcp), API keys in one click |
@@ -77,12 +77,12 @@ All generated videos and avatars are saved to a public gallery with SEO pages fo
 ## Key Features
 
 ### Clip Generator
-- **Viral Moment Detection**: Google Gemini 3.0 Flash analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
+- **Viral Moment Detection**: OpenRouter (default `google/gemini-2.5-flash`) analyzes transcripts and scene boundaries to detect 3-15 high-potential moments
 - **Smart 9:16 Cropping**: Dual-mode AI reframing — TRACK mode (MediaPipe + YOLOv8 face tracking) and GENERAL mode (blurred background)
 - **Auto Subtitles**: faster-whisper with word-level timestamps, styled and burned into clips
 - **AI Voice Dubbing**: ElevenLabs integration for 30+ languages with voice cloning
 - **Hook Text Overlays**: AI-generated attention-grabbing text overlays
-- **AI Video Effects**: Gemini-generated FFmpeg filters for professional effects
+- **AI Video Effects**: OpenRouter-generated FFmpeg filters for professional effects
 
 ### AI Shorts Pipeline
 1. **Analyze**: Scrape website URL + web research, or generate from manual description
@@ -168,22 +168,22 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 
 | Service | Free Tier | Paid Cost | Used For |
 |---------|-----------|-----------|----------|
-| **Google Gemini** | Free trial with generous limits | < $0.01 per 10-min video | Viral moment detection, script generation, web research |
+| **OpenRouter** | Pay-per-use, many models | typically < $0.01 per 10-min video | Viral moment detection, layout, editor, thumbnails |
 | **fal.ai** | Pay-per-use | ~$0.50-1.50 per AI Short | Actor generation, talking head video, lip-sync |
 | **ElevenLabs** | Free tier available | Pay-per-use | Voiceover, voice dubbing |
 | **Upload-Post** | **10 free uploads/month** to all networks (no credit card) | Pay-per-use | Auto-publishing to TikTok, Instagram, YouTube |
 | **AWS S3** | Optional | ~$0.023/GB | Cloud backup for clips and gallery |
 
-**Bottom line:** You can clip videos for practically free with Gemini, and publish 10 videos/month to all social networks at zero cost with Upload-Post.
+**Bottom line:** You can clip videos with only an OpenRouter key (`OPENROUTER_API_KEY`), and publish 10 videos/month to all social networks at zero cost with Upload-Post. Gemini is optional.
 
-**Don't want to run any of that?** [openshorts.app](https://www.openshorts.app/) is the same software on our hardware: our NVIDIA GPU clips an 8-minute video in about 50 seconds instead of the 5 to 8 minutes it takes on a typical CPU, the Gemini key is included, and auto-publishing is already wired up. Free plan is 20 minutes a month with a watermark and no credit card; paid plans start at $12/mo for 100 minutes without watermark.
+**Don't want to run any of that?** [openshorts.app](https://www.openshorts.app/) is the same software on our hardware: our NVIDIA GPU clips an 8-minute video in about 50 seconds instead of the 5 to 8 minutes it takes on a typical CPU, the AI key is included, and auto-publishing is already wired up. Free plan is 20 minutes a month with a watermark and no credit card; paid plans start at $12/mo for 100 minutes without watermark.
 
 ---
 
 ## Requirements
 
 - **Docker & Docker Compose**
-- **OpenRouter API Key** ([openrouter.ai/keys](https://openrouter.ai/keys)) **or** **Google AI Studio key** — pick the provider in Settings (`AI_PROVIDER`). Gemini keys only go to Google; OpenRouter keys only go to openrouter.ai. Never mix them.
+- **OpenRouter API Key** ([openrouter.ai/keys](https://openrouter.ai/keys)) — the only AI key required. Set `OPENROUTER_API_KEY` and run `docker compose`. Default provider is `openrouter`. A Google AI Studio key is optional (`AI_PROVIDER=gemini`); keys are never crossed (AIza never goes to OpenRouter, `sk-or-` never goes to Google).
 - **fal.ai API Key** ([Pay-per-use](https://fal.ai)) — required for AI Shorts (actor generation, video, lip-sync)
 - **ElevenLabs API Key** ([Free tier](https://elevenlabs.io)) — required for voiceover/dubbing
 - **Upload-Post API Key** ([free tier](https://upload-post.com)) — required for direct social posting
@@ -198,10 +198,11 @@ git clone https://github.com/your-username/OpenShorts.git
 cd OpenShorts
 ```
 
-### 2. Configure (optional)
+### 2. Configure
 ```bash
 cp .env.example .env
-# Edit .env with your AWS keys for S3 backup
+# Set OPENROUTER_API_KEY — that is enough to process a podcast.
+# GEMINI_API_KEY is optional. Add AWS keys only if you want S3 backup.
 ```
 
 ### 3. Launch
@@ -209,10 +210,12 @@ cp .env.example .env
 docker compose up --build
 ```
 
+Compose forwards `OPENROUTER_API_KEY` (and optional `OPENROUTER_IMAGE_MODEL`) into the backend. No Gemini key is required.
+
 ### 4. Open Dashboard
 Navigate to **`http://localhost:5175`**
 
-1. Go to **Settings** and enter your API keys (Gemini, fal.ai, ElevenLabs, Upload-Post)
+1. Go to **Settings** and enter your API keys (OpenRouter, plus optional fal.ai, ElevenLabs, Upload-Post)
 2. **Clip Generator**: Upload a long-form video to generate viral shorts
 3. **AI Shorts**: Describe your product or paste a URL to generate UGC marketing videos
 4. **YouTube Studio**: Generate thumbnails, titles, and descriptions for YouTube
@@ -226,15 +229,15 @@ Navigate to **`http://localhost:5175`**
 1. **Ingest** — Local video upload (or self-hosted URL ingest via yt-dlp)
 2. **Transcribe** — faster-whisper with word-level timestamps
 3. **Detect** — PySceneDetect for scene boundaries
-4. **Analyze** — Gemini identifies 3-15 viral moments (15-60s each)
+4. **Analyze** — OpenRouter identifies 3-15 viral moments (15-60s each)
 5. **Extract** — FFmpeg precise clip cutting
 6. **Reframe** — AI vertical cropping with subject tracking
 7. **Effects** — Subtitles, hooks, AI video effects
 8. **Publish** — S3 backup + Upload-Post social distribution
 
 ### AI Shorts
-1. **Analyze** — Website scraping + Gemini web research (or manual description)
-2. **Script** — Gemini generates viral scripts with segments
+1. **Analyze** — Website scraping + AI web research (or manual description)
+2. **Script** — AI generates viral scripts with segments
 3. **Actor** — Flux 2 Pro portrait generation (or gallery/upload)
 4. **Voice** — ElevenLabs TTS voiceover
 5. **Video** — Hailuo 2.3 Fast img2video + VEED Lipsync (Low Cost) or Kling Avatar v2 (Premium)

@@ -1,20 +1,55 @@
 import os
-import uuid
-import time
-import json
-from google import genai
-from google.genai import types
+from typing import List
 
-# Text/analysis model (title, description, tags). The image model below stays
-# on gemini-3.1-flash-image-preview — flash-lite cannot generate images.
-TEXT_MODEL = os.environ.get("GEMINI_MODEL_THUMBNAIL") or os.environ.get("GEMINI_MODEL") or "gemini-3.1-flash-lite"
 from PIL import Image
+from pydantic import BaseModel
+
+# Text/analysis model for titles and descriptions (OpenRouter chat).
+TEXT_MODEL = (
+    os.environ.get("OPENROUTER_MODEL_THUMBNAIL")
+    or os.environ.get("OPENROUTER_MODEL")
+    or os.environ.get("GEMINI_MODEL_THUMBNAIL")
+    or os.environ.get("GEMINI_MODEL")
+    or None
+)
+
+
+class TitleRecommendation(BaseModel):
+    index: int
+    reason: str
+
+
+class TitlesResponse(BaseModel):
+    titles: List[str]
+    transcript_summary: str = ""
+    language: str = ""
+    recommended: List[TitleRecommendation] = []
+
+
+class RefinedTitlesResponse(BaseModel):
+    titles: List[str]
+
+
+class DescriptionResponse(BaseModel):
+    description: str
+
+
+def _text_model():
+    import gemini_worker
+    return gemini_worker.resolve_model(explicit=TEXT_MODEL, provider="openrouter")
+
+
+def _openrouter_client(api_key):
+    import gemini_worker
+    gemini_worker.assert_openrouter_safe_key(api_key)
+    return gemini_worker.openrouter_client(api_key)
 
 
 def analyze_video_for_titles(api_key, video_path, transcript=None):
     """
-    Transcribes a video and uses Gemini to suggest viral YouTube titles.
+    Transcribes a video and uses OpenRouter to suggest viral YouTube titles.
     If transcript is provided, skips Whisper transcription.
+    No File API upload — the model sees the transcript, not the video file.
     Returns: { "titles": [...], "transcript_summary": "...", "language": "...", "segments": [...], "video_duration": ... }
     """
     import gemini_worker
@@ -28,7 +63,7 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
 
     prompt = f"""You are a YouTube title expert who creates viral, click-worthy titles.
 
-Analyze this video and its transcript, then suggest 10 YouTube titles that would maximize CTR (click-through rate).
+Analyze this video from its transcript, then suggest 10 YouTube titles that would maximize CTR (click-through rate).
 
 TRANSCRIPT:
 {transcript['text']}
@@ -57,63 +92,31 @@ OUTPUT JSON:
     ]
 }}"""
 
-    print("🤖 [Thumbnail] Asking Gemini for title suggestions...")
-    # Gemini-native UI path: ignore process-level OpenRouter default so an
-    # AIza key is never refused here, and google/gemini-* never hits genai.
-    model_name = gemini_worker.resolve_model(
-        explicit=TEXT_MODEL, provider="gemini")
-    print("📤 [Thumbnail] Uploading video to Gemini...")
-    client = gemini_worker.make_client(api_key, provider="gemini")
-    file_upload = client.files.upload(file=video_path)
-    while True:
-        file_info = client.files.get(name=file_upload.name)
-        if file_info.state == "ACTIVE":
-            break
-        elif file_info.state == "FAILED":
-            raise Exception("Video processing failed by Gemini.")
-        time.sleep(2)
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[file_upload, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
+    print("🤖 [Thumbnail] Asking OpenRouter for title suggestions...")
+    model_name = _text_model()
+    client = _openrouter_client(api_key)
+    parsed, _response = gemini_worker.complete_json(
+        client, model_name, prompt, TitlesResponse)
 
-    # Extract segments and duration from transcript for later use
     segments = transcript.get("segments", [])
     video_duration = segments[-1]["end"] if segments else 0
 
-    try:
-        text = (getattr(response, "text", None) or "").strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-        start_idx = text.find('{')
-        end_idx = text.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            text = text[start_idx:end_idx + 1]
-
-        result = json.loads(text)
-        result["transcript_summary"] = result.get("transcript_summary", "")
-        result["language"] = result.get("language", transcript["language"])
-        result["segments"] = segments
-        result["video_duration"] = video_duration
-        return result
-    except json.JSONDecodeError:
-        print(f"❌ [Thumbnail] Failed to parse titles JSON: {response.text}")
+    result = parsed if isinstance(parsed, dict) else {}
+    titles = result.get("titles") or []
+    if not titles:
+        print("❌ [Thumbnail] Title response had no titles — using transcript fallback.")
         return {
             "titles": ["Could not generate titles - please try again"],
             "transcript_summary": transcript["text"][:500],
             "language": transcript["language"],
             "segments": segments,
-            "video_duration": video_duration
+            "video_duration": video_duration,
         }
+    result["transcript_summary"] = result.get("transcript_summary", "")
+    result["language"] = result.get("language", transcript["language"])
+    result["segments"] = segments
+    result["video_duration"] = video_duration
+    return result
 
 
 def refine_titles(api_key, context, user_message, conversation_history=None):
@@ -121,9 +124,8 @@ def refine_titles(api_key, context, user_message, conversation_history=None):
     Takes video context + user feedback and returns refined title suggestions.
     """
     import gemini_worker
-    client = gemini_worker.make_client(api_key, provider="gemini")
-    model_name = gemini_worker.resolve_model(
-        explicit=TEXT_MODEL, provider="gemini")
+    client = _openrouter_client(api_key)
+    model_name = _text_model()
 
     history_text = ""
     if conversation_history:
@@ -153,60 +155,36 @@ OUTPUT JSON:
     "titles": ["title1", "title2", ...]
 }}"""
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
+    parsed, _response = gemini_worker.complete_json(
+        client, model_name, prompt, RefinedTitlesResponse)
+    if isinstance(parsed, dict) and parsed.get("titles"):
+        return parsed
+    print("❌ [Thumbnail] Failed to parse refined titles")
+    return {"titles": ["Could not refine titles - please try again"]}
 
-    try:
-        text = response.text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
 
-        start_idx = text.find('{')
-        end_idx = text.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            text = text[start_idx:end_idx + 1]
+def _save_b64_image(b64_json: str, filepath: str) -> None:
+    import base64
+    from io import BytesIO
 
-        return json.loads(text)
-    except json.JSONDecodeError:
-        print(f"❌ [Thumbnail] Failed to parse refined titles: {response.text}")
-        return {"titles": ["Could not refine titles - please try again"]}
+    raw = base64.b64decode(b64_json)
+    image = Image.open(BytesIO(raw))
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    image.save(filepath, format="JPEG", quality=90)
 
 
 def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
     """
-    Generates YouTube thumbnails using Gemini image generation.
-    Returns list of saved image paths (relative URLs).
+    Generates YouTube thumbnails via the OpenRouter Image API.
+    No google.genai / Imagen. Returns list of saved image paths (relative URLs).
     """
     import gemini_worker
-    gemini_worker.assert_google_safe_key(api_key)
-    client = gemini_worker.make_client(api_key, provider="gemini")
+    gemini_worker.assert_openrouter_safe_key(api_key)
 
     output_dir = os.path.join("output", "thumbnails", session_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    prompt_parts = []
-
-    # Add face image if provided
-    if face_image_path and os.path.exists(face_image_path):
-        face_img = Image.open(face_image_path)
-        prompt_parts.append(face_img)
-
-    # Add background image if provided
-    if bg_image_path and os.path.exists(bg_image_path):
-        bg_img = Image.open(bg_image_path)
-        prompt_parts.append(bg_img)
-
-    # Build video context block
     context_block = ""
     if video_context:
         context_block = f"""
@@ -214,7 +192,6 @@ VIDEO CONTEXT (use this to understand the video and design a relevant thumbnail)
 {video_context}
 """
 
-    # Build extra instructions block (high priority)
     extra_block = ""
     if extra_prompt:
         extra_block = f"""
@@ -238,7 +215,8 @@ DESIGN REQUIREMENTS:
 - Use vibrant, eye-catching colors that match the video's mood
 - Professional YouTube thumbnail aesthetic
 - Clean composition — text and face/subject as clear focal points
-- NO clutter, NO small text, NO watermarks"""
+- NO clutter, NO small text, NO watermarks
+- Aspect ratio 16:9"""
 
     if face_image_path and os.path.exists(face_image_path):
         text_prompt += "\n- Include the provided face/person prominently with an exaggerated expression (surprise, excitement, shock)"
@@ -246,36 +224,42 @@ DESIGN REQUIREMENTS:
     if bg_image_path and os.path.exists(bg_image_path):
         text_prompt += "\n- Use the provided background image as the base/backdrop"
 
-    prompt_parts.append(text_prompt)
+    references = []
+    if face_image_path and os.path.exists(face_image_path):
+        references.append(gemini_worker.image_file_reference(face_image_path))
+    if bg_image_path and os.path.exists(bg_image_path):
+        references.append(gemini_worker.image_file_reference(bg_image_path))
 
     thumbnails = []
     last_error = None
+    image_model = gemini_worker.resolve_image_model()
     for i in range(count):
-        print(f"🎨 [Thumbnail] Generating thumbnail {i + 1}/{count}...")
+        print(f"🎨 [Thumbnail] Generating thumbnail {i + 1}/{count} via OpenRouter ({image_model})...")
         try:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-image-preview",
-                contents=prompt_parts,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio="16:9",
-                        image_size="2K"
-                    )
-                )
+            payload = gemini_worker.generate_openrouter_images(
+                api_key,
+                text_prompt,
+                n=1,
+                aspect_ratio="16:9",
+                quality="high",
+                output_format="jpeg",
+                references=references or None,
             )
-
-            for part in response.parts:
-                if part.text is not None:
-                    print(f"📝 [Thumbnail] Gemini text: {part.text}")
-                elif image := part.as_image():
-                    filename = f"thumb_{i + 1}.jpg"
-                    filepath = os.path.join(output_dir, filename)
-                    image.save(filepath)
-                    thumbnails.append(f"/thumbnails/{session_id}/{filename}")
-                    print(f"✅ [Thumbnail] Saved: {filepath}")
-                    break
-
+            saved = False
+            for item in payload.get("data") or []:
+                b64 = (item or {}).get("b64_json")
+                if not b64:
+                    continue
+                filename = f"thumb_{i + 1}.jpg"
+                filepath = os.path.join(output_dir, filename)
+                _save_b64_image(b64, filepath)
+                thumbnails.append(f"/thumbnails/{session_id}/{filename}")
+                print(f"✅ [Thumbnail] Saved: {filepath}")
+                saved = True
+                break
+            if not saved:
+                last_error = "OpenRouter returned no image bytes"
+                print(f"❌ [Thumbnail] Generation {i + 1} failed: {last_error}")
         except Exception as e:
             last_error = str(e)
             print(f"❌ [Thumbnail] Generation {i + 1} failed: {e}")
@@ -288,16 +272,13 @@ DESIGN REQUIREMENTS:
 
 def generate_youtube_description(api_key, title, transcript_segments, language, video_duration):
     """
-    Uses Gemini to generate a YouTube description with chapter markers from transcript segments.
+    Uses OpenRouter to generate a YouTube description with chapter markers.
     Returns: { "description": "full description text with chapters" }
     """
     import gemini_worker
-    gemini_worker.assert_google_safe_key(api_key)
-    client = gemini_worker.make_client(api_key, provider="gemini")
-    model_name = gemini_worker.resolve_model(
-        explicit=TEXT_MODEL, provider="gemini")
+    client = _openrouter_client(api_key)
+    model_name = _text_model()
 
-    # Format segments for the prompt
     formatted_segments = []
     for seg in transcript_segments:
         start = seg.get("start", 0)
@@ -308,7 +289,6 @@ def generate_youtube_description(api_key, title, transcript_segments, language, 
 
     segments_text = "\n".join(formatted_segments)
 
-    # Format total duration
     dur_mins = int(video_duration // 60)
     dur_secs = int(video_duration % 60)
     duration_str = f"{dur_mins}:{dur_secs:02d}"
@@ -335,18 +315,15 @@ REQUIREMENTS:
 5. Add 5-10 relevant hashtags at the end
 6. Keep the total description under 5000 characters
 
-OUTPUT: Return ONLY the description text (no JSON wrapper, no markdown code blocks). The description should be ready to paste directly into YouTube."""
+OUTPUT JSON: {{"description": "the ready-to-paste YouTube description, no markdown code blocks"}}"""
 
     print("🤖 [Thumbnail] Generating YouTube description with chapters...")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[prompt],
-    )
-
-    description = response.text.strip()
-    # Clean up any accidental markdown wrappers
+    parsed, _response = gemini_worker.complete_json(
+        client, model_name, prompt, DescriptionResponse)
+    description = ""
+    if isinstance(parsed, dict):
+        description = str(parsed.get("description") or "").strip()
     if description.startswith("```"):
         lines = description.split("\n")
         description = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
     return {"description": description}

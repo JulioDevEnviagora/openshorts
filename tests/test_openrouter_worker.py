@@ -13,6 +13,7 @@ def _clean_ai_env(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_IMAGE_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
 
 
@@ -164,9 +165,13 @@ class TestRequestProvider:
         assert gemini_worker.resolve_request_provider(
             "gemini", billing=True) == "gemini"
 
-    def test_billing_defaults_to_gemini_not_compose_openrouter(self, monkeypatch):
+    def test_billing_with_openrouter_key_does_not_force_gemini(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
         assert gemini_worker.resolve_provider() == "openrouter"
+        assert gemini_worker.resolve_request_provider(None, billing=True) == "openrouter"
+
+    def test_billing_without_openrouter_key_keeps_managed_gemini_path(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         assert gemini_worker.resolve_request_provider(None, billing=True) == "gemini"
 
     def test_self_host_without_header_still_infers_openrouter(self, monkeypatch):
@@ -272,9 +277,61 @@ class TestJpegDataUris:
 
 
 class TestFileApiSkip:
-    def test_image_generation_is_gemini_only(self):
-        assert "OpenRouter" in gemini_worker.GEMINI_IMAGE_ONLY
+    def test_visual_prompt_does_not_claim_full_video_watch(self):
+        assert "Watch the whole thing" not in gemini_worker.VISUAL_PROMPT_TEMPLATE
+        assert "sampled still" in gemini_worker.VISUAL_PROMPT_TEMPLATE.lower()
 
     def test_visual_clips_does_not_raise_file_api_unavailable(self):
         main = pytest.importorskip("main")
         assert main.get_visual_clips("missing.mp4", 30) is None
+
+
+class TestOpenRouterImageApi:
+    def test_default_image_model_is_gpt_image_1(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_IMAGE_MODEL", raising=False)
+        assert gemini_worker.resolve_image_model() == "openai/gpt-image-1"
+
+    def test_image_model_env_wins(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_IMAGE_MODEL", "openai/gpt-image-2")
+        assert gemini_worker.resolve_image_model() == "openai/gpt-image-2"
+
+    def test_image_generation_rejects_ai_studio_key(self):
+        with pytest.raises(RuntimeError, match="AIza"):
+            gemini_worker.generate_openrouter_images("AIza-studio", "a thumbnail")
+
+    def test_image_generation_posts_to_openrouter_images(self, monkeypatch):
+        captured = {}
+
+        class DummyResp:
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"b64_json": "abc", "media_type": "image/jpeg"}]}
+
+        class DummyClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, headers=None, json=None):
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["json"] = json
+                return DummyResp()
+
+        import httpx as httpx_mod
+        monkeypatch.setattr(httpx_mod, "Client", DummyClient)
+
+        result = gemini_worker.generate_openrouter_images(
+            "sk-or-v1-test", "make a 16:9 thumbnail", n=1, references=[{"type": "image_url"}])
+        assert result["data"][0]["b64_json"] == "abc"
+        assert captured["url"] == gemini_worker.OPENROUTER_IMAGES_URL
+        assert captured["headers"]["Authorization"] == "Bearer sk-or-v1-test"
+        assert captured["json"]["model"] == "openai/gpt-image-1"
+        assert captured["json"]["aspect_ratio"] == "16:9"
+        assert captured["json"]["input_references"]

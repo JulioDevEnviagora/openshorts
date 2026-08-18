@@ -4,8 +4,6 @@ import re
 import subprocess
 import time
 from typing import List
-from google import genai
-from google.genai import types
 from pydantic import BaseModel
 
 from edit_builder import build_filter_string
@@ -28,10 +26,12 @@ class VideoEditor:
     def __init__(self, api_key, provider=None):
         import gemini_worker
         self.api_key = api_key
-        # Gemini-native UI default. Do not inherit process-level OpenRouter
-        # just because compose has OPENROUTER_API_KEY.
+        # OpenRouter-first. An explicit provider wins; otherwise follow
+        # compose / env (OPENROUTER_API_KEY is enough — Gemini is optional).
         chosen = (provider or "").strip().lower()
-        self.provider = chosen if chosen in gemini_worker.PROVIDERS else "gemini"
+        if chosen not in gemini_worker.PROVIDERS:
+            chosen = gemini_worker.resolve_provider()
+        self.provider = chosen
         self.client = gemini_worker.make_client(api_key, provider=self.provider)
         editor_model = os.environ.get("GEMINI_MODEL_EDITOR")
         self.model_name = gemini_worker.resolve_model(
@@ -129,16 +129,15 @@ class VideoEditor:
         If no effects genuinely improve the video, return {{"edits": []}}.
         """
 
-        print("🤖 Asking Gemini for an edit decision list...")
+        print("🤖 Asking the AI for an edit decision list...")
         if self.provider == "openrouter":
             raw_edits = self._openrouter_json(prompt, EditPlan).get("edits")
             if raw_edits is None:
                 return None
         else:
-            # Low media resolution: Gemini samples at 1 FPS and normalizes frames to
-            # fixed token sizes, so "low" (~70 tokens/frame) cuts video-input cost
-            # without hurting motion/scene understanding. Fall back to defaults if
-            # the SDK or model rejects the option.
+            from google.genai import types
+            # Optional Gemini File API path. OpenRouter samples stills instead
+            # — do not invent a File API there.
             try:
                 config = types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -178,7 +177,7 @@ class VideoEditor:
             has_captions=has_captions,
         )
         if not filter_string:
-            print("ℹ️ Gemini suggested no (valid) edits — keeping the clip untouched.")
+            print("ℹ️ AI suggested no (valid) edits — keeping the clip untouched.")
             return {"filter_string": None, "edits": []}
         print(f"🎯 Applying {len(applied)} edits: " + ", ".join(f"{e['type']}@{e['start']:.1f}s" for e in applied))
         return {"filter_string": filter_string, "edits": applied}
@@ -240,10 +239,11 @@ class VideoEditor:
         }}
         """
 
-        print("🤖 Asking Gemini for Remotion effects config...")
+        print("🤖 Asking the AI for Remotion effects config...")
         if self.provider == "openrouter":
             parsed = self._openrouter_json(prompt, None)
             return parsed if isinstance(parsed, dict) else None
+        from google.genai import types
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=[video_file_obj, prompt],
@@ -415,6 +415,7 @@ class VideoEditor:
                     self.client, self.model_name, prompt, None)
                 repaired = (parsed or {}).get("filter_string")
                 return repaired if isinstance(repaired, str) and repaired.strip() else None
+            from google.genai import types
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,

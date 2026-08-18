@@ -92,9 +92,9 @@ async def _user_from_request(request: Request):
 def request_ai_provider(request: Request) -> str:
     """Provider for this request.
 
-    ``X-AI-Provider`` wins when present. Cloud/billing otherwise stays on
-    managed Gemini — compose ``OPENROUTER_API_KEY`` must not silently steal
-    the job. Self-host without a header still infers from env keys.
+    ``X-AI-Provider`` wins when present. Otherwise OpenRouter-first: a
+    compose ``OPENROUTER_API_KEY`` is enough (billing does not force
+    managed Gemini). Cloud can still pick Gemini explicitly.
     """
     import gemini_worker
     header = request.headers.get("X-AI-Provider")
@@ -121,6 +121,29 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     if header:
         return header
     return gemini_worker.gemini_key()
+
+
+async def resolve_openrouter(request: Request) -> Optional[str]:
+    """OpenRouter key only. Never returns an AI Studio ``AIza…`` token.
+
+    Cloud entitled users get compose ``OPENROUTER_API_KEY``. Self-host:
+    header if it is not an AIza key, else the compose OpenRouter key.
+    """
+    import gemini_worker
+    if BILLING_ENABLED:
+        user = await _user_from_request(request)
+        if managed_keys.has_active_entitlement(user):
+            return gemini_worker.openrouter_key()
+        return None
+    header = (request.headers.get("X-Gemini-Key") or "").strip() or None
+    if header:
+        if gemini_worker.looks_like_ai_studio_key(header):
+            return None
+        try:
+            return gemini_worker.assert_openrouter_safe_key(header)
+        except RuntimeError:
+            return None
+    return gemini_worker.openrouter_key()
 
 
 async def resolve_pipeline_key(request: Request) -> Optional[str]:
@@ -166,17 +189,21 @@ async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
 
 
 def gemini_missing_error():
-    """The right 4xx when no Gemini key could be resolved.
+    """The right 4xx when no AI key could be resolved.
 
     402 for a signed-in-but-not-entitled cloud user (needs a plan); 400 otherwise
-    (BYOK header simply missing).
+    (BYOK header / compose key missing). Self-host happy path is
+    ``OPENROUTER_API_KEY`` — Gemini is optional.
     """
     if BILLING_ENABLED:
         return HTTPException(status_code=402, detail={
             "error": "no_plan",
             "message": "This action needs an active plan. Choose a plan or add your own API key.",
         })
-    return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    return HTTPException(
+        status_code=400,
+        detail="Missing OpenRouter API key. Set OPENROUTER_API_KEY or send X-Gemini-Key with an OpenRouter key (sk-or-…). Gemini is optional.",
+    )
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -3405,9 +3432,7 @@ async def thumbnail_analyze(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Analyze a video and suggest viral YouTube titles."""
-    # Gemini-native UI: managed / AI Studio key only. Process-level
-    # OpenRouter default must not reject an AIza key here.
-    api_key = await resolve_gemini(request)
+    api_key = await resolve_openrouter(request)
     if not api_key:
         raise gemini_missing_error()
 
@@ -3456,7 +3481,7 @@ async def thumbnail_analyze(
                         raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
                     buffer.write(chunk)
 
-    # Meter the managed Gemini analysis (no-op for self-host).
+    # Meter the managed analysis (no-op for self-host).
     analyze_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
     reservation_id = await reserve_managed_action(request, analyze_minutes, session_id, "thumbnail_analyze")
 
@@ -3507,7 +3532,7 @@ async def thumbnail_titles(
     request: Request,
 ):
     """Refine title suggestions or accept a manual title."""
-    api_key = await resolve_gemini(request)
+    api_key = await resolve_openrouter(request)
     if not api_key:
         raise gemini_missing_error()
 
@@ -3571,14 +3596,12 @@ async def thumbnail_generate(
     face: Optional[UploadFile] = File(None),
     background: Optional[UploadFile] = File(None),
 ):
-    """Generate YouTube thumbnails with Gemini image generation."""
-    # Gemini-native UI: managed / AI Studio key only. An OpenRouter
-    # request header must not 400 this path — ignore process default.
-    api_key = await resolve_gemini(request)
+    """Generate YouTube thumbnails via the OpenRouter Image API."""
+    api_key = await resolve_openrouter(request)
     if not api_key:
         raise gemini_missing_error()
 
-    # Image generation is the one expensive managed Gemini call — paid plans only.
+    # Image generation is the expensive managed call — paid plans only.
     if BILLING_ENABLED:
         user = await _user_from_request(request)
         if user is not None and user.plan == "free":
@@ -3590,7 +3613,7 @@ async def thumbnail_generate(
     # Clamp count
     count = min(max(1, count), 6)
 
-    # Gemini image generation is the expensive managed call — meter it against the
+    # Image generation is the expensive managed call — meter it against the
     # plan quota (a batch ≈ THUMBNAIL_MINUTES). No-op for BYOK / self-host.
     thumb_minutes = _cloud_config.THUMBNAIL_MINUTES if BILLING_ENABLED else 0
     reservation_id = await reserve_managed_action(request, thumb_minutes, session_id, "thumbnail")
@@ -3637,7 +3660,7 @@ async def thumbnail_generate(
         )
 
         if not thumbnails:
-            raise HTTPException(status_code=500, detail="Thumbnail generation failed. Please check your Gemini API key has access to image generation (gemini-3.1-flash-image-preview model).")
+            raise HTTPException(status_code=500, detail="Thumbnail generation failed. Check OPENROUTER_API_KEY and OPENROUTER_IMAGE_MODEL (default openai/gpt-image-1).")
 
         # Success — charge the reserved minutes.
         if reservation_id:
@@ -3665,7 +3688,7 @@ async def thumbnail_describe(
     request: Request,
 ):
     """Generate a YouTube description with chapters from the transcript."""
-    api_key = await resolve_gemini(request)
+    api_key = await resolve_openrouter(request)
     if not api_key:
         raise gemini_missing_error()
 
