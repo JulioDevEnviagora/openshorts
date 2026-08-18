@@ -185,6 +185,7 @@ function App() {
   const [durableClips, setDurableClips] = useState({});
 
   const [aiProvider, setAiProvider] = useState(() => loadAiSettings().provider);
+  const [aiProviderExplicit, setAiProviderExplicit] = useState(() => loadAiSettings().explicit);
   const [openrouterKey, setOpenrouterKey] = useState(() => loadAiSettings().openrouterKey);
   const [geminiNativeKey, setGeminiNativeKey] = useState(() => loadAiSettings().geminiKey);
   const apiKey = selectedAiKey({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
@@ -192,6 +193,17 @@ function App() {
     if (aiProvider === 'gemini') setGeminiNativeKey(value);
     else setOpenrouterKey(value);
   };
+  const setAiProviderChoice = (value) => {
+    setAiProvider(value);
+    setAiProviderExplicit(true);
+  };
+  const pipelineHeaders = () => aiHeaders({
+    provider: aiProvider,
+    openrouterKey,
+    geminiKey: geminiNativeKey,
+    explicit: aiProviderExplicit,
+    billingEnabled,
+  });
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -474,8 +486,19 @@ function App() {
   }, [jobId, status, results, activeTab, noSource, projectState]);
 
   useEffect(() => {
-    persistAiSettings({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
-  }, [aiProvider, openrouterKey, geminiNativeKey]);
+    if (billingEnabled && !aiProviderExplicit && aiProvider !== 'gemini') {
+      setAiProvider('gemini');
+    }
+  }, [billingEnabled, aiProviderExplicit, aiProvider]);
+
+  useEffect(() => {
+    persistAiSettings({
+      provider: aiProvider,
+      openrouterKey,
+      geminiKey: geminiNativeKey,
+      persistProvider: aiProviderExplicit,
+    });
+  }, [aiProvider, aiProviderExplicit, openrouterKey, geminiNativeKey]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -651,7 +674,7 @@ function App() {
       let body;
       // BYOK sends the Gemini header; managed users rely on the bearer token
       // that apiFetch attaches automatically.
-      const headers = aiHeaders({ provider: aiProvider, openrouterKey, geminiKey: geminiNativeKey });
+      const headers = pipelineHeaders();
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -988,7 +1011,7 @@ function App() {
                 <>
               <KeyInput
                 provider={aiProvider}
-                onProviderChange={setAiProvider}
+                onProviderChange={setAiProviderChoice}
                 openrouterKey={openrouterKey}
                 geminiKey={geminiNativeKey}
                 onOpenrouterKeySet={setOpenrouterKey}
@@ -1307,7 +1330,7 @@ function App() {
           )}
 
           {activeTab === 'thumbnails' && (
-            <ThumbnailStudio geminiApiKey={apiKey} aiProvider={aiProvider} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+            <ThumbnailStudio geminiApiKey={apiKey} aiProvider={aiProvider} aiProviderExplicit={aiProviderExplicit} billingEnabled={billingEnabled} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
           )}
 
           {/* View: Gallery */}
@@ -1479,6 +1502,8 @@ function App() {
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
                           aiProvider={aiProvider}
+                          aiProviderExplicit={aiProviderExplicit}
+                          billingEnabled={billingEnabled}
                           elevenLabsKey={elevenLabsKey}
                           isManaged={isManaged}
                           connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}

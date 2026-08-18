@@ -90,12 +90,15 @@ async def _user_from_request(request: Request):
 
 
 def request_ai_provider(request: Request) -> str:
-    """Provider for this request: ``X-AI-Provider`` header, else process env."""
+    """Provider for this request.
+
+    ``X-AI-Provider`` wins when present. Cloud/billing otherwise stays on
+    managed Gemini — compose ``OPENROUTER_API_KEY`` must not silently steal
+    the job. Self-host without a header still infers from env keys.
+    """
     import gemini_worker
-    header = (request.headers.get("X-AI-Provider") or "").strip().lower()
-    if header in gemini_worker.PROVIDERS:
-        return header
-    return gemini_worker.resolve_provider()
+    header = request.headers.get("X-AI-Provider")
+    return gemini_worker.resolve_request_provider(header, billing=BILLING_ENABLED)
 
 
 async def resolve_gemini(request: Request) -> Optional[str]:
@@ -3402,7 +3405,9 @@ async def thumbnail_analyze(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     """Analyze a video and suggest viral YouTube titles."""
-    api_key = await resolve_pipeline_key(request)
+    # Gemini-native UI: managed / AI Studio key only. Process-level
+    # OpenRouter default must not reject an AIza key here.
+    api_key = await resolve_gemini(request)
     if not api_key:
         raise gemini_missing_error()
 
@@ -3567,9 +3572,8 @@ async def thumbnail_generate(
     background: Optional[UploadFile] = File(None),
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
-    import gemini_worker
-    if request_ai_provider(request) == "openrouter":
-        raise HTTPException(status_code=400, detail=gemini_worker.GEMINI_IMAGE_ONLY)
+    # Gemini-native UI: managed / AI Studio key only. An OpenRouter
+    # request header must not 400 this path — ignore process default.
     api_key = await resolve_gemini(request)
     if not api_key:
         raise gemini_missing_error()

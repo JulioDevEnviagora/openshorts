@@ -146,6 +146,34 @@ class TestResolveModel:
         monkeypatch.setenv("OPENROUTER_MODEL", "ignored")
         assert gemini_worker.resolve_model("gemini-2.0-flash") == "google/gemini-2.0-flash"
 
+    def test_gemini_ui_path_ignores_process_openrouter_default(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
+        monkeypatch.setenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+        assert gemini_worker.resolve_provider() == "openrouter"
+        assert gemini_worker.resolve_model(provider="gemini") == "gemini-3.1-flash-lite"
+        assert "/" not in gemini_worker.resolve_model(provider="gemini")
+        assert gemini_worker.resolve_model(
+            explicit="google/gemini-2.5-flash", provider="gemini"
+        ) == "gemini-2.5-flash"
+
+
+class TestRequestProvider:
+    def test_explicit_header_wins_even_on_billing(self):
+        assert gemini_worker.resolve_request_provider(
+            "openrouter", billing=True) == "openrouter"
+        assert gemini_worker.resolve_request_provider(
+            "gemini", billing=True) == "gemini"
+
+    def test_billing_defaults_to_gemini_not_compose_openrouter(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
+        assert gemini_worker.resolve_provider() == "openrouter"
+        assert gemini_worker.resolve_request_provider(None, billing=True) == "gemini"
+
+    def test_self_host_without_header_still_infers_openrouter(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-1")
+        assert gemini_worker.resolve_request_provider(
+            None, billing=False) == "openrouter"
+
 
 class TestResponseFormat:
     def test_structured_schema_uses_pydantic_json_schema(self):

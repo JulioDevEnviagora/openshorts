@@ -28,14 +28,14 @@ class VideoEditor:
     def __init__(self, api_key, provider=None):
         import gemini_worker
         self.api_key = api_key
-        self.provider = (provider or "").strip().lower() or gemini_worker.resolve_provider()
+        # Gemini-native UI default. Do not inherit process-level OpenRouter
+        # just because compose has OPENROUTER_API_KEY.
+        chosen = (provider or "").strip().lower()
+        self.provider = chosen if chosen in gemini_worker.PROVIDERS else "gemini"
         self.client = gemini_worker.make_client(api_key, provider=self.provider)
-        self.model_name = (
-            os.environ.get("GEMINI_MODEL_EDITOR")
-            or gemini_worker.resolve_model()
-        )
-        if self.provider == "openrouter" and self.model_name.startswith("gemini-"):
-            self.model_name = gemini_worker.map_model_id(self.model_name)
+        editor_model = os.environ.get("GEMINI_MODEL_EDITOR")
+        self.model_name = gemini_worker.resolve_model(
+            explicit=editor_model, provider=self.provider)
         self._openrouter_video_path = None
 
     def upload_video(self, video_path):

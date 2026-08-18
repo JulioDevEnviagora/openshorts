@@ -9,7 +9,7 @@ export function looksLikeOpenRouterKey(key) {
   return raw.startsWith('sk-or-') || raw.startsWith('sk-orv-');
 }
 
-export function loadAiSettings() {
+export function loadAiSettings({ billingEnabled } = {}) {
   const storedProvider = (typeof localStorage !== 'undefined' && localStorage.getItem('ai_provider')) || '';
   const legacy = (typeof localStorage !== 'undefined' && localStorage.getItem('gemini_key')) || '';
   let openrouterKey = (typeof localStorage !== 'undefined' && localStorage.getItem('openrouter_key')) || '';
@@ -26,13 +26,17 @@ export function loadAiSettings() {
     }
   }
 
+  const explicit = storedProvider === 'openrouter' || storedProvider === 'gemini';
   let provider = storedProvider;
-  if (provider !== 'openrouter' && provider !== 'gemini') {
-    if (openrouterKey) provider = 'openrouter';
+  if (!explicit) {
+    // Cloud uses managed Gemini unless the user explicitly picks OpenRouter.
+    // Self-host with only an OpenRouter key can still default to OpenRouter.
+    if (billingEnabled) provider = 'gemini';
+    else if (openrouterKey) provider = 'openrouter';
     else if (geminiKey) provider = 'gemini';
     else provider = 'openrouter';
   }
-  return { provider, openrouterKey, geminiKey };
+  return { provider, explicit, openrouterKey, geminiKey };
 }
 
 export function selectedAiKey({ provider, openrouterKey, geminiKey }) {
@@ -42,16 +46,26 @@ export function selectedAiKey({ provider, openrouterKey, geminiKey }) {
   return key || '';
 }
 
+export function shouldSendAiProvider({ explicit, billingEnabled }) {
+  if (explicit) return true;
+  return billingEnabled === false;
+}
+
 export function aiHeaders(settings) {
   const key = selectedAiKey(settings);
-  const headers = { 'X-AI-Provider': settings.provider || 'openrouter' };
+  const headers = {};
+  // Cloud without an explicit choice: omit the header so the server keeps
+  // managed Gemini. Sending "openrouter" by default would drop MANAGED_GEMINI.
+  if (shouldSendAiProvider(settings) && settings.provider) {
+    headers['X-AI-Provider'] = settings.provider;
+  }
   if (key) headers['X-Gemini-Key'] = key;
   return headers;
 }
 
-export function persistAiSettings({ provider, openrouterKey, geminiKey }) {
+export function persistAiSettings({ provider, openrouterKey, geminiKey, persistProvider }) {
   if (typeof localStorage === 'undefined') return;
-  if (provider === 'openrouter' || provider === 'gemini') {
+  if (persistProvider && (provider === 'openrouter' || provider === 'gemini')) {
     localStorage.setItem('ai_provider', provider);
   }
   if (openrouterKey) localStorage.setItem('openrouter_key', openrouterKey);

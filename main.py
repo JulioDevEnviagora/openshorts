@@ -1320,20 +1320,46 @@ def _visual_clip_targets():
 
 
 def _clean_visual_shorts(shorts, video_duration):
+    """Clamp to [0, duration] and drop clips that do not fit.
+
+    OpenRouter silent path only sees stills, so the model often invents
+    timestamps past the end of a long source.
+    """
     clean = []
+    dropped = 0
+    duration = float(video_duration or 0)
     for s in shorts or []:
-        s["start"] = max(0.0, float(s.get("start", 0)))
-        s["end"] = min(float(video_duration), float(s.get("end", 0)))
-        if s["end"] - s["start"] >= 1.0:
+        try:
+            start = max(0.0, float(s.get("start", 0)))
+            end = min(duration, float(s.get("end", 0)))
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if end - start >= 1.0 and start < duration:
+            s["start"], s["end"] = start, end
             clean.append(s)
+        else:
+            dropped += 1
+    if dropped:
+        print(
+            f"   dropped {dropped} clip(s) outside [0, {duration:g}s] "
+            f"(frame-sample timestamps are approximate)"
+        )
     return clean
 
 
 def get_visual_clips(video_path, video_duration, language="en"):
-    """Clip a SILENT video by vision. Gemini uploads the file; OpenRouter
-    sends sampled JPEG frames. Same {"shorts", "cost_analysis"} shape."""
+    """Clip a SILENT video by vision.
+
+    Gemini uploads the file. OpenRouter does **not** watch the video: it
+    scores ~12 still frames. Timestamps from that path are approximate and
+    are clamped to ``[0, duration]``.
+    """
     provider = gemini_worker.resolve_provider()
-    print(f"🎥  Silent video — analyzing with {provider} vision (no transcript)...")
+    if provider == "openrouter":
+        print("🎥  Silent video — OpenRouter samples still frames (not a full-video watch).")
+    else:
+        print(f"🎥  Silent video — analyzing with {provider} vision (no transcript)...")
     api_key = gemini_worker.resolve_api_key()
     if not api_key:
         print(f"❌ Error: no API key for provider={provider}.")
@@ -1398,13 +1424,20 @@ def get_visual_clips(video_path, video_duration, language="en"):
 
 
 def _visual_clips_from_frames(client, model_name, video_path, video_duration, prompt):
-    """OpenRouter (and any no-File-API provider): 12×1024 JPEG samples."""
+    """OpenRouter silent path: N JPEG stills, not a full-video watch.
+
+    Timestamps the model returns are approximate; ``_clean_visual_shorts``
+    clamps them to ``[0, duration]`` and drops clips that do not fit.
+    """
     import layout_picker
     frames = layout_picker.sample_frames(video_path)
     if not frames:
-        print("❌ No readable frames — cannot analyze a silent video.")
+        print("❌ No readable frames — OpenRouter silent path cannot sample stills.")
         return None
-    print(f"   sampled {len(frames)} JPEG frame(s) @ {layout_picker.SAMPLE_WIDTH}px")
+    print(
+        f"   sampled {len(frames)} stills @ {layout_picker.SAMPLE_WIDTH}px "
+        f"— timestamps are approximate, not a full-video watch"
+    )
     try:
         parsed, response = gemini_worker.complete_json_with_frames(
             client, model_name, prompt, gemini_worker.VisualResponse, frames,

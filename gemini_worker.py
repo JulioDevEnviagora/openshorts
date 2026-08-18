@@ -145,9 +145,29 @@ def map_model_id(name: str) -> str:
     return model
 
 
-def resolve_model(explicit: Optional[str] = None) -> str:
-    """Model id for the active provider."""
-    if resolve_provider() == "gemini":
+def resolve_request_provider(explicit: Optional[str] = None, *, billing: bool = False) -> str:
+    """Provider for one request. An explicit header/setting wins.
+
+    Cloud/billing defaults to Gemini (managed key) unless the request
+    explicitly asks for OpenRouter. Self-host without an explicit choice
+    still infers from env keys (OpenRouter if only ``OPENROUTER_API_KEY``).
+    """
+    chosen = (explicit or "").strip().lower()
+    if chosen in PROVIDERS:
+        return chosen
+    if billing:
+        return "gemini"
+    return resolve_provider()
+
+
+def resolve_model(explicit: Optional[str] = None, provider: Optional[str] = None) -> str:
+    """Model id for ``provider`` (or the process default).
+
+    Gemini-native callers must pass ``provider='gemini'`` so a compose
+    ``OPENROUTER_API_KEY`` cannot turn the id into ``google/gemini-2.5-flash``.
+    """
+    chosen = (provider or "").strip().lower() or resolve_provider()
+    if chosen == "gemini":
         raw = (explicit or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()
         if raw.startswith("google/"):
             raw = raw.split("/", 1)[1]
@@ -243,9 +263,9 @@ class DetailResponse(BaseModel):
     shorts: List[DetailClipModel]
 
 
-# Visual (no-transcript) clip selection: Gemini watches a silent video and
-# picks moments from the imagery. Same output shape as DetailClipModel minus
-# the transcript-only source_window_id.
+# Visual (no-transcript) clip selection. Gemini can upload the file; OpenRouter
+# only sees sampled stills (timestamps are approximate). Same output shape as
+# DetailClipModel minus the transcript-only source_window_id.
 class VisualClipModel(BaseModel):
     start: float
     end: float
